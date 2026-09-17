@@ -7,8 +7,9 @@ const holdBody = { holdId: "hold_1", ceilingMicroUsd: 600000, balance: { microUs
 const shortfall = {
   error: "insufficient_credits",
   message: "Add credits to continue.",
-  required: { microUsd: 12500000, usd: "12.50" },
-  balance: { microUsd: 0, usd: "0.00", availableMicroUsd: 0 },
+  // The service renders money with a derived `credits` field; the client accepts it and keeps the contract shape.
+  required: { microUsd: 12500000, credits: 1250, usd: "12.50" },
+  balance: { microUsd: 0, credits: 0, usd: "0.00", availableMicroUsd: 0 },
   topup: { claimId: CLAIM_ID, url: `${ORIGIN}/t/${CLAIM_ID}`, expiresAt: EXPIRES_AT, packs, suggestedPackId: "p25" },
 };
 

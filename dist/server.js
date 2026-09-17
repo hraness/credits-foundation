@@ -76,7 +76,7 @@ function errorCode(error) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.1.0";
+var CREDITS_FOUNDATION_VERSION = "0.1.1";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -678,7 +678,7 @@ function parseRelease(value) {
   return balance === null ? null : Object.freeze({ holdId: value.holdId, state: "released", balance });
 }
 function parseInsufficient(fields, message) {
-  if (!shape(fields, ["required", "balance", "topup"]) || !shape(fields.required, ["microUsd", "usd"]) || !isMicroUsd(fields.required.microUsd) || fields.required.microUsd < 0 || typeof fields.required.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.required.usd) || !shape(fields.balance, ["microUsd", "usd", "availableMicroUsd"]) || !isMicroUsd(fields.balance.microUsd) || typeof fields.balance.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.balance.usd) || !isMicroUsd(fields.balance.availableMicroUsd) || !shape(fields.topup, ["claimId", "url", "expiresAt", "packs", "suggestedPackId"]) || !isCreditsClaimId(fields.topup.claimId) || !safeUrl(fields.topup.url) || !timestamp(fields.topup.expiresAt) || !isCreditsPackId(fields.topup.suggestedPackId) || !Array.isArray(fields.topup.packs) || fields.topup.packs.length < 1 || fields.topup.packs.length > 16)
+  if (!shape(fields, ["required", "balance", "topup"]) || !shape(fields.required, ["microUsd", "usd"], ["credits"]) || !isMicroUsd(fields.required.microUsd) || fields.required.microUsd < 0 || typeof fields.required.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.required.usd) || fields.required.credits !== undefined && !Number.isSafeInteger(fields.required.credits) || !shape(fields.balance, ["microUsd", "usd", "availableMicroUsd"], ["credits"]) || !isMicroUsd(fields.balance.microUsd) || typeof fields.balance.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.balance.usd) || fields.balance.credits !== undefined && !Number.isSafeInteger(fields.balance.credits) || !isMicroUsd(fields.balance.availableMicroUsd) || !shape(fields.topup, ["claimId", "url", "expiresAt", "packs", "suggestedPackId"]) || !isCreditsClaimId(fields.topup.claimId) || !safeUrl(fields.topup.url) || !timestamp(fields.topup.expiresAt) || !isCreditsPackId(fields.topup.suggestedPackId) || !Array.isArray(fields.topup.packs) || fields.topup.packs.length < 1 || fields.topup.packs.length > 16)
     return null;
   const packs = [];
   for (const item of fields.topup.packs) {

@@ -1,4 +1,4 @@
-export declare const CREDITS_FOUNDATION_VERSION = "0.1.0";
+export declare const CREDITS_FOUNDATION_VERSION = "0.1.1";
 export declare const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export declare const MICRO_USD_PER_USD = 1000000;
 export declare const MICRO_USD_PER_CREDIT = 10000;

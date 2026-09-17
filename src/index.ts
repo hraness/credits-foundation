@@ -4,7 +4,7 @@ import {
   email, origin, plainText, record, safeInteger, safeUrl, shape, stringArray, timestamp,
 } from "./internal.js";
 
-export const CREDITS_FOUNDATION_VERSION = "0.1.0";
+export const CREDITS_FOUNDATION_VERSION = "0.1.1";
 export const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export const MICRO_USD_PER_USD = 1_000_000;
 export const MICRO_USD_PER_CREDIT = 10_000;

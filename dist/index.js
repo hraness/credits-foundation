@@ -76,7 +76,7 @@ function errorCode(error) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.1.0";
+var CREDITS_FOUNDATION_VERSION = "0.1.1";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;

@@ -106,11 +106,14 @@ function parseRelease(value: unknown): CreditsRelease | null {
 }
 
 function parseInsufficient(fields: Readonly<Record<string, unknown>>, message: string | undefined): CreditsInsufficientError | null {
-  if (!shape(fields, ["required", "balance", "topup"]) || !shape(fields.required, ["microUsd", "usd"])
+  // The service renders money as `{ microUsd, credits, usd }`; `credits` is derived display data and optional here.
+  if (!shape(fields, ["required", "balance", "topup"]) || !shape(fields.required, ["microUsd", "usd"], ["credits"])
     || !isMicroUsd(fields.required.microUsd) || fields.required.microUsd < 0 || typeof fields.required.usd !== "string"
     || !/^-?\d{1,10}\.\d{2}$/u.test(fields.required.usd)
-    || !shape(fields.balance, ["microUsd", "usd", "availableMicroUsd"]) || !isMicroUsd(fields.balance.microUsd)
+    || (fields.required.credits !== undefined && !Number.isSafeInteger(fields.required.credits))
+    || !shape(fields.balance, ["microUsd", "usd", "availableMicroUsd"], ["credits"]) || !isMicroUsd(fields.balance.microUsd)
     || typeof fields.balance.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.balance.usd)
+    || (fields.balance.credits !== undefined && !Number.isSafeInteger(fields.balance.credits))
     || !isMicroUsd(fields.balance.availableMicroUsd)
     || !shape(fields.topup, ["claimId", "url", "expiresAt", "packs", "suggestedPackId"]) || !isCreditsClaimId(fields.topup.claimId)
     || !safeUrl(fields.topup.url) || !timestamp(fields.topup.expiresAt) || !isCreditsPackId(fields.topup.suggestedPackId)

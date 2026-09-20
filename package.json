@@ -1,6 +1,6 @@
 {
   "name": "@hraness/credits-foundation",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Prepaid credits for Hraness products: shared money and pricing vocabulary, the credits-required envelope, a CLI adapter for the credits service, and a product backend client.",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,7 @@
     "./node": { "types": "./dist/node.d.ts", "import": "./dist/node.js" },
     "./server": { "types": "./dist/server.d.ts", "import": "./dist/server.js" }
   },
-  "files": ["src/index.ts", "src/node.ts", "src/server.ts", "src/internal.ts", "src/transport.ts", "dist", "docs", "README.md", "LICENSE"],
+  "files": ["src/index.ts", "src/node.ts", "src/server.ts", "src/internal.ts", "src/transport.ts", "src/pickup-v2.ts", "dist", "docs", "README.md", "LICENSE"],
   "scripts": {
     "build": "bun build src/index.ts src/node.ts src/server.ts --target node --format esm --outdir dist && tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",

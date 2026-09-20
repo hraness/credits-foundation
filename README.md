@@ -93,6 +93,19 @@ form through a bounded write that never throws, so a closed pipe cannot change
 the product's exit code. The product still exits with its own failure code and,
 in its own `--json` envelope, sets `error.code` to `credits_required`.
 
+## Parse the v2 recovery wire
+
+The root entry exports pure parsers for v2 claim creation, credential pickup,
+acknowledgement and balance responses. Pass the identity saved by the caller
+and its configured service origin; malformed, contradictory or mismatched
+responses return `null`. Accepted values are deeply frozen copies.
+
+These exports support an inactive protocol. They do not add v2 commands,
+transport or durable credential recovery, and do not enable the authority's
+v2 endpoints. Existing CLI commands below continue to use v1. See the
+[v2 wire reference](docs/pickup-v2.md) for the exact caller bindings, limits
+and compatibility boundary.
+
 ## Connect a CLI
 
 Import `runCreditsCommand` from `@hraness/credits-foundation/node`, route the

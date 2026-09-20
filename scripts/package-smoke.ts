@@ -23,7 +23,8 @@ try {
     throw new Error("Unexpected packed file.");
   }
   for (const required of ["package/dist/index.js", "package/dist/node.js", "package/dist/server.js", "package/dist/index.d.ts",
-    "package/dist/node.d.ts", "package/dist/server.d.ts", "package/README.md", "package/LICENSE", "package/docs/agents.md"]) {
+    "package/dist/node.d.ts", "package/dist/server.d.ts", "package/dist/pickup-v2.d.ts", "package/src/pickup-v2.ts",
+    "package/README.md", "package/LICENSE", "package/docs/agents.md", "package/docs/pickup-v2.md"]) {
     if (!members.includes(required)) throw new Error(`Missing packed file ${required}.`);
   }
   const installed = join(scratch, "node_modules", "@hraness", "credits-foundation");
@@ -37,6 +38,7 @@ try {
   await writeFile(join(scratch, "package.json"), JSON.stringify({ private: true, type: "module" }));
   await writeFile(join(scratch, "consumer.ts"), `
 import { buildCreditsRequiredEnvelope, creditsProtocol, priceCostPlus, priceUnit, parseCreditsStatus, type CreditsProductProfile, type CreditsRequiredEnvelope } from '@hraness/credits-foundation';
+import { parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2, parseCreditsPickupRequestV2, parseCreditsPickupResponseV2, parseCreditsBalanceV2, parseCreditsErrorV2, type CreditsCreationExpectationV2, type CreditsPickupExpectationV2, type CreditsBalanceV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
 import { ceilingFor, createCreditsClient, type CreditsClientResult, type CreditsHold } from '@hraness/credits-foundation/server';
 declare global { namespace NodeJS { interface ProcessEnv { readonly NODE_ENV: 'development' | 'production' | 'test'; } } }
@@ -46,6 +48,15 @@ creditsProtocol(profile);
 priceUnit(200000, 3);
 priceCostPlus([{ microUsd: 1, basis: 'reported' }], { takeRate: 0.35, roundingStepMicroUsd: 10000, fixedOffsetMicroUsd: 2000, minPriceMicroUsd: 10000 });
 parseCreditsStatus({});
+const expected: CreditsCreationExpectationV2 = { creationId: '11111111-1111-4111-8111-111111111111', productId: 'peopleblade', deviceId: '22222222-2222-4222-8222-222222222222', serviceOrigin: 'https://credits.hraness.com' };
+const pickup: CreditsPickupExpectationV2 = { operation: 'status', binding: { claimId: 'clm_1', productId: expected.productId, deviceId: expected.deviceId }, pickupId: null };
+parseCreditsClaimCreateV2({});
+parseCreditsClaimCreatedV2({}, expected);
+parseCreditsPickupRequestV2({});
+parseCreditsPickupResponseV2({}, pickup);
+const balance: CreditsBalanceV2 | null = parseCreditsBalanceV2({}, expected.productId);
+void balance;
+parseCreditsErrorV2({ error: 'not_found' }, 404);
 runCreditsCommand(profile, ['protocol', '--json'], { env: {}, stderr: process.stderr });
 emitCreditsRequired(envelope, { stderr: process.stderr }, 'agent');
 readStoredDeviceToken(profile, { env: {} });
@@ -60,13 +71,20 @@ ceilingFor(${rateCard}, 'enrich_contact', 2);
   const entry = join(scratch, "consumer.mjs");
   await writeFile(entry, `
 import assert from 'node:assert/strict';
-import { buildCreditsRequiredEnvelope, formatUsd, priceUnit } from '@hraness/credits-foundation';
+import { buildCreditsRequiredEnvelope, formatUsd, priceUnit, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
 import { ceilingFor, createCreditsClient } from '@hraness/credits-foundation/server';
 const profile = { id: 'peopleblade', name: 'PeopleBlade', command: ['peopleblade'] };
 const io = { env: { XDG_STATE_HOME: ${JSON.stringify(stateHome)} }, fetch: async () => { throw new Error('no network in the smoke test'); } };
 assert.equal(formatUsd(12500000), '12.50');
 assert.equal(priceUnit(200000, 3), 600000);
+const create = parseCreditsClaimCreateV2({ schemaVersion: 'hraness-credits-claim-create-v2', creationId: '11111111-1111-4111-8111-111111111111', product: 'peopleblade', device: { id: '22222222-2222-4222-8222-222222222222' } });
+assert.ok(create && Object.isFrozen(create) && Object.isFrozen(create.device));
+const createdWire = { schemaVersion: 'hraness-credits-claim-created-v2', creationId: create.creationId, binding: { claimId: 'clm_1', productId: create.product, deviceId: create.device.id }, createdAt: '2026-09-20T00:00:00.000Z', expiresAt: '2026-09-21T00:00:00.000Z', payUrl: 'https://credits.hraness.com/t/clm_1' };
+const expected = { creationId: create.creationId, productId: create.product, deviceId: create.device.id, serviceOrigin: 'https://credits.hraness.com' };
+const created = parseCreditsClaimCreatedV2(createdWire, expected);
+assert.ok(created && Object.isFrozen(created.binding));
+assert.equal(parseCreditsClaimCreatedV2({ ...createdWire, payUrl: 'https://elsewhere.invalid/t/clm_1' }, expected), null);
 const protocol = await runCreditsCommand(profile, ['protocol', '--json'], io);
 assert.equal(protocol.exitCode, 0);
 assert.equal(JSON.parse(protocol.stdout).schemaVersion, 'hraness-credits-protocol-v1');

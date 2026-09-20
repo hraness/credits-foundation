@@ -4,7 +4,19 @@ import {
   email, origin, plainText, record, safeInteger, safeUrl, shape, stringArray, timestamp,
 } from "./internal.js";
 
-export const CREDITS_FOUNDATION_VERSION = "0.1.1";
+export {
+  CREDITS_CLAIM_CREATE_V2, CREDITS_CLAIM_CREATED_V2, CREDITS_PICKUP_REQUEST_V2,
+  CREDITS_PICKUP_RESPONSE_V2, CREDITS_BALANCE_V2, CREDITS_V2_MAX_REQUEST_BYTES,
+  CREDITS_V2_MAX_RESPONSE_BYTES, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2,
+  parseCreditsPickupRequestV2, parseCreditsPickupResponseV2, parseCreditsBalanceV2,
+  parseCreditsErrorV2,
+  type CreditsBindingV2, type CreditsClaimCreateV2, type CreditsClaimCreatedV2,
+  type CreditsCreationExpectationV2, type CreditsPickupOperationV2,
+  type CreditsPickupRequestV2, type CreditsPickupResponseV2,
+  type CreditsPickupExpectationV2, type CreditsBalanceV2, type CreditsErrorV2,
+} from "./pickup-v2.js";
+
+export const CREDITS_FOUNDATION_VERSION = "0.2.0";
 export const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export const MICRO_USD_PER_USD = 1_000_000;
 export const MICRO_USD_PER_CREDIT = 10_000;

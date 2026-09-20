@@ -1,6 +1,6 @@
 {
   "name": "@hraness/credits-foundation",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Prepaid credits for Hraness products: shared money and pricing vocabulary, the credits-required envelope, a CLI adapter for the credits service, and a product backend client.",
   "license": "MIT",
   "type": "module",

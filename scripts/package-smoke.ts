@@ -40,7 +40,7 @@ try {
 import { buildCreditsRequiredEnvelope, creditsProtocol, priceCostPlus, priceUnit, parseCreditsStatus, type CreditsProductProfile, type CreditsRequiredEnvelope } from '@hraness/credits-foundation';
 import { parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2, parseCreditsPickupRequestV2, parseCreditsPickupResponseV2, parseCreditsBalanceV2, parseCreditsErrorV2, type CreditsCreationExpectationV2, type CreditsPickupExpectationV2, type CreditsBalanceV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
-import { ceilingFor, createCreditsClient, type CreditsClientResult, type CreditsHold } from '@hraness/credits-foundation/server';
+import { ceilingFor, createCreditsClient, type CreditsClientResult, type CreditsHold, type CreditsSettlement, type CreditsRelease, type CreditsTerminalHoldState } from '@hraness/credits-foundation/server';
 declare global { namespace NodeJS { interface ProcessEnv { readonly NODE_ENV: 'development' | 'production' | 'test'; } } }
 const profile: CreditsProductProfile = { id: 'peopleblade', name: 'PeopleBlade', command: ['peopleblade'] };
 const envelope: CreditsRequiredEnvelope = buildCreditsRequiredEnvelope(${requiredInput});
@@ -63,6 +63,9 @@ readStoredDeviceToken(profile, { env: {} });
 const client = createCreditsClient({ origin: 'https://credits.hraness.com', productKey: 'cr_prod_' + 'C'.repeat(43), fetch });
 const hold: Promise<CreditsClientResult<CreditsHold>> = client.hold({ subjectToken: 'cr_dev_' + 'A'.repeat(43), operation: 'enrich_contact', idempotencyKey: 'k' });
 void hold;
+const terminalState: CreditsTerminalHoldState = 'expired';
+const needsReconciliation = (result: CreditsSettlement | CreditsRelease) => result.state === terminalState || result.state === 'released';
+void needsReconciliation;
 ceilingFor(${rateCard}, 'enrich_contact', 2);
 `);
   await writeFile(join(scratch, "tsconfig.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true, skipLibCheck: false, noEmit: true, types: ["node"] }, include: ["consumer.ts"] }));

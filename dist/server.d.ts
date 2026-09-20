@@ -34,9 +34,11 @@ export interface CreditsSettleInput {
     readonly units?: number;
     readonly costs?: readonly CreditsCost[];
 }
+/** A replay reports the authority's existing terminal state, even when it differs from the requested action. */
+export type CreditsTerminalHoldState = "settled" | "released" | "expired";
 export type CreditsSettlement = Readonly<{
     holdId: string;
-    state: "settled";
+    state: CreditsTerminalHoldState;
     chargedMicroUsd: number;
     balance: CreditsLedgerBalance;
     lowBalance: boolean;
@@ -44,9 +46,10 @@ export type CreditsSettlement = Readonly<{
         url: string;
     }>;
 }>;
+/** The release wire carries no charge amount; `settled` never implies a refund. */
 export type CreditsRelease = Readonly<{
     holdId: string;
-    state: "released";
+    state: CreditsTerminalHoldState;
     balance: CreditsLedgerBalance;
 }>;
 export interface CreditsClaimInput {
@@ -108,9 +111,9 @@ export declare function ceilingFor(rateCard: CreditsRateCard, operation: string,
 export declare function createCreditsClient(options: CreditsClientOptions): Readonly<{
     /** Reserve a ceiling for one operation; 402 returns `insufficient_credits` with a topup link bound to the subject's wallet. */
     hold(input: CreditsHoldInput): Promise<CreditsClientResult<CreditsHold>>;
-    /** Charge `min(price, ceiling)` from reported costs or units; retrying a settled hold returns the recorded result. */
+    /** Charge an active hold; terminal replays preserve the recorded settled/released/expired result. */
     settle(holdId: string, input?: CreditsSettleInput): Promise<CreditsClientResult<CreditsSettlement>>;
-    /** Release a hold without charging. */
+    /** Release an active hold. A terminal replay may be settled or expired; it does not refund a prior charge. */
     release(holdId: string): Promise<CreditsClientResult<CreditsRelease>>;
     /** Balance for a subject token, in the same shape as the CLI status. */
     balance(subjectToken: string): Promise<CreditsClientResult<CreditsStatus>>;

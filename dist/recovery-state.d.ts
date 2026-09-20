@@ -1,5 +1,5 @@
-/** Inactive, internal pure recovery model. No persistence, transport or credential generation. */
-import { type CreditsBindingV2, type CreditsClaimCreatedV2 } from "./pickup-v2.js";
+/** Portable pure recovery model. No persistence, transport or credential generation. */
+import { type CreditsBindingV2, type CreditsClaimCreatedV2, type CreditsTopupCreatedV2 } from "./pickup-v2.js";
 export declare const RECOVERY_STATE_SCHEMA = "hraness-credits-recovery-state-v2";
 export declare const RECOVERY_MAX_BYTES = 32768;
 type RegistrationStage = "create-pending" | "payment-pending" | "paid" | "pickup-pending" | "ack-pending" | "expired" | "revoked";
@@ -24,6 +24,14 @@ export type RecoveryTopup = Readonly<{
         payUrl: string | null;
     }> | null;
 }>;
+export type RecoveryTopupV2 = Readonly<{
+    kind: "topup-v2";
+    operationId: string;
+    canonicalCreateBody: string;
+    originalToken: string;
+    stage: "create-pending" | "claim-pending" | "expired";
+    created: CreditsTopupCreatedV2 | null;
+}>;
 export type RecoveryState = Readonly<{
     schemaVersion: typeof RECOVERY_STATE_SCHEMA;
     databaseId: string;
@@ -38,9 +46,9 @@ export type RecoveryState = Readonly<{
         source: "legacy" | "pickup-v2";
         binding: CreditsBindingV2 | null;
     }> | null;
-    pending: RecoveryRegistration | RecoveryTopup | null;
+    pending: RecoveryRegistration | RecoveryTopup | RecoveryTopupV2 | null;
 }>;
-export type RecoveryAction = "create-v2" | "status-v2" | "pickup-v2" | "credential-v2" | "ack-v2" | "create-topup-v1" | "status-topup-v1";
+export type RecoveryAction = "create-v2" | "status-v2" | "pickup-v2" | "credential-v2" | "ack-v2" | "create-topup-v1" | "status-topup-v1" | "create-topup-v2" | "status-topup-v2";
 export type RecoveryActionTicket = Readonly<{
     databaseId: string;
     generation: number;
@@ -59,14 +67,14 @@ export type RecoveryEvent = Readonly<{
     pickupId: string;
     candidateToken: string;
 }> | Readonly<{
-    type: "prepare-topup";
+    type: "prepare-topup" | "prepare-topup-v2";
     operationId: string;
     body: unknown;
 }> | Readonly<{
     type: "uncertain";
     ticket: RecoveryActionTicket;
 }> | Readonly<{
-    type: "created-v2" | "status-v2" | "pickup-v2" | "ack-v2" | "credential-v2" | "created-topup-v1" | "status-topup-v1";
+    type: "created-v2" | "status-v2" | "pickup-v2" | "ack-v2" | "credential-v2" | "created-topup-v1" | "status-topup-v1" | "created-topup-v2" | "status-topup-v2";
     ticket: RecoveryActionTicket;
     response: unknown;
 }>;

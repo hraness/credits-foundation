@@ -1,7 +1,8 @@
-/** Inactive, internal pure recovery model. No persistence, transport or credential generation. */
+/** Portable pure recovery model. No persistence, transport or credential generation. */
 import {
   CREDITS_CLAIM_CREATE_V2, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2,
   parseCreditsPickupResponseV2, type CreditsBindingV2, type CreditsClaimCreatedV2,
+  parseCreditsTopupCreateV2, parseCreditsTopupCreatedV2, parseCreditsTopupStatusV2, type CreditsTopupCreatedV2,
 } from "./pickup-v2.js";
 import {
   CREDITS_STATE_SCHEMA, isCreditsClaimId, isCreditsClaimSecret, isCreditsDeviceToken,
@@ -22,14 +23,18 @@ export type RecoveryTopup = Readonly<{
   stage: "prepared" | "create-dispatched" | "claim-pending" | "expired";
   claim: Readonly<{ claimId: string; expiresAt: string; payUrl: string | null }> | null;
 }>;
+export type RecoveryTopupV2 = Readonly<{
+  kind: "topup-v2"; operationId: string; canonicalCreateBody: string; originalToken: string;
+  stage: "create-pending" | "claim-pending" | "expired"; created: CreditsTopupCreatedV2 | null;
+}>;
 export type RecoveryState = Readonly<{
   schemaVersion: typeof RECOVERY_STATE_SCHEMA;
   databaseId: string; productId: string; serviceOrigin: string; deviceId: string;
   revision: number; generation: number; bootstrap: "prepared" | "active";
   active: Readonly<{ token: string; source: "legacy" | "pickup-v2"; binding: CreditsBindingV2 | null }> | null;
-  pending: RecoveryRegistration | RecoveryTopup | null;
+  pending: RecoveryRegistration | RecoveryTopup | RecoveryTopupV2 | null;
 }>;
-export type RecoveryAction = "create-v2" | "status-v2" | "pickup-v2" | "credential-v2" | "ack-v2" | "create-topup-v1" | "status-topup-v1";
+export type RecoveryAction = "create-v2" | "status-v2" | "pickup-v2" | "credential-v2" | "ack-v2" | "create-topup-v1" | "status-topup-v1" | "create-topup-v2" | "status-topup-v2";
 export type RecoveryActionTicket = Readonly<{
   databaseId: string; generation: number; operationId: string; preparedRevision: number; action: RecoveryAction;
 }>;
@@ -37,9 +42,9 @@ export type RecoveryActionTicket = Readonly<{
 export type RecoveryEvent =
   | Readonly<{ type: "activate" | "signout" | "clear-expired" | "dispatch-topup" | "begin-pickup" }>
   | Readonly<{ type: "prepare-registration"; operationId: string; body: unknown; claimSecret: string; pickupId: string; candidateToken: string }>
-  | Readonly<{ type: "prepare-topup"; operationId: string; body: unknown }>
+  | Readonly<{ type: "prepare-topup" | "prepare-topup-v2"; operationId: string; body: unknown }>
   | Readonly<{ type: "uncertain"; ticket: RecoveryActionTicket }>
-  | Readonly<{ type: "created-v2" | "status-v2" | "pickup-v2" | "ack-v2" | "credential-v2" | "created-topup-v1" | "status-topup-v1";
+  | Readonly<{ type: "created-v2" | "status-v2" | "pickup-v2" | "ack-v2" | "credential-v2" | "created-topup-v1" | "status-topup-v1" | "created-topup-v2" | "status-topup-v2";
       ticket: RecoveryActionTicket; response: unknown }>;
 export type RecoveryFailure = "invalid-state" | "invalid-event" | "invalid-transition" | "stale-ticket" | "counter-exhausted";
 export type RecoveryDecision =
@@ -51,7 +56,7 @@ export type RecoveryDecision =
 const PRODUCT = /^[a-z0-9_-]{1,32}$/u;
 const UUID = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
 const CLAIM = /^[A-Za-z0-9_-]{1,128}$/u;
-const ACTIONS: readonly RecoveryAction[] = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1"];
+const ACTIONS: readonly RecoveryAction[] = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1", "create-topup-v2", "status-topup-v2"];
 const encoder = new TextEncoder();
 class Invalid extends Error { constructor(readonly reason: RecoveryFailure = "invalid-event") { super("Invalid recovery value."); } }
 function fail(reason?: RecoveryFailure): never { throw new Invalid(reason); }
@@ -120,6 +125,11 @@ function topupBody(body: unknown, s: Pick<RecoveryState, "productId" | "deviceId
   creation({ ...fields, schemaVersion: CREDITS_CLAIM_CREATE_V2, creationId: operationId }, s);
   const out = canonical(r); require(encoder.encode(out).length <= 4096); return out;
 }
+function topupV2Body(body: unknown, s: Pick<RecoveryState, "productId" | "deviceId">, operationId: string) {
+  const parsed = parseCreditsTopupCreateV2(body);
+  require(parsed && parsed.product === s.productId && parsed.device.id === s.deviceId && parsed.creationId === operationId);
+  return parsed;
+}
 function readState(v: unknown): RecoveryState {
   const r = object(v, ["schemaVersion", "databaseId", "productId", "serviceOrigin", "deviceId", "revision", "generation", "bootstrap", "active", "pending"]);
   require(r.schemaVersion === RECOVERY_STATE_SCHEMA && origin(r.serviceOrigin));
@@ -134,7 +144,7 @@ function readState(v: unknown): RecoveryState {
     state.active = { token: a.token, source, binding: a.binding === null ? null : bound(a.binding, state.productId, state.deviceId) };
   }
   if (r.pending !== null) {
-    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim"]).kind;
+    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim", "originalToken"]).kind;
     if (kind === "registration-v2") {
       require(state.active === null && state.bootstrap === "active");
       const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claimSecret", "pickupId", "candidateToken", "created"]);
@@ -143,6 +153,19 @@ function readState(v: unknown): RecoveryState {
       const created = p.created === null ? null : parseCreditsClaimCreatedV2(p.created, { creationId: body.creationId, productId: state.productId, deviceId: state.deviceId, serviceOrigin: state.serviceOrigin });
       require((stage === "create-pending") === (p.created === null) && (p.created === null || created !== null));
       state.pending = { kind, operationId: text(p.operationId, 36, UUID), canonicalCreateBody: bodyText, stage, created, claimSecret: p.claimSecret, pickupId: text(p.pickupId, 36, UUID), candidateToken: p.candidateToken };
+    } else if (kind === "topup-v2") {
+      require(state.active !== null && state.bootstrap === "active");
+      const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "originalToken", "created"]);
+      const operationId = text(p.operationId, 36, UUID), bodyText = text(p.canonicalCreateBody, 4096);
+      const body = topupV2Body(bodyText, state, operationId);
+      require(canonical(body) === bodyText && p.originalToken === state.active.token);
+      const stage = choice(p.stage, ["create-pending", "claim-pending", "expired"]);
+      const created = p.created === null ? null : parseCreditsTopupCreatedV2(p.created, {
+        creationId: operationId, productId: state.productId, deviceId: state.deviceId, serviceOrigin: state.serviceOrigin,
+      });
+      // Creation allows 128, but the actual follow-on v1 status route allows 64.
+      require((stage === "create-pending") === (p.created === null) && (p.created === null || (created && isCreditsClaimId(created.binding.claimId))));
+      state.pending = { kind, operationId, canonicalCreateBody: bodyText, originalToken: state.active.token, stage, created };
     } else {
       require(kind === "topup-v1" && state.active !== null);
       const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claim"]), operationId = text(p.operationId, 36, UUID);
@@ -190,6 +213,7 @@ function allowed(s: RecoveryState, action: RecoveryAction, dispatchReply = false
   if (s.bootstrap !== "active" || !s.pending) return false;
   const p = s.pending;
   if (p.kind === "topup-v1") return action === "status-topup-v1" ? p.stage === "claim-pending" : action === "create-topup-v1" && dispatchReply && p.stage === "create-dispatched";
+  if (p.kind === "topup-v2") return action === "create-topup-v2" ? p.stage === "create-pending" : action === "status-topup-v2" && ["claim-pending", "expired"].includes(p.stage);
   return action === "create-v2" ? p.stage === "create-pending" : action === "status-v2" ? !["create-pending", "expired", "revoked"].includes(p.stage)
     : action === "pickup-v2" ? p.stage === "pickup-pending" : (action === "ack-v2" || action === "credential-v2") && p.stage === "ack-pending";
 }
@@ -241,10 +265,29 @@ export function transitionRecoveryState(stateInput: unknown, eventInput: unknown
       if (p) { require(p.kind === "topup-v1" && p.operationId === operationId && p.canonicalCreateBody === body, "invalid-transition"); return unchanged(s); }
       return commit(s, { pending: { kind: "topup-v1", operationId, canonicalCreateBody: body, stage: "prepared", claim: null } });
     }
+    if (type === "prepare-topup-v2") {
+      const e = object(event, ["type", "operationId", "body"]); require(s.active, "invalid-transition");
+      const operationId = text(e.operationId, 36, UUID), body = canonical(topupV2Body(e.body, s, operationId));
+      if (p) { require(p.kind === "topup-v2" && p.operationId === operationId && p.canonicalCreateBody === body && p.originalToken === s.active.token, "invalid-transition"); return unchanged(s); }
+      return commit(s, { pending: { kind: "topup-v2", operationId, canonicalCreateBody: body, originalToken: s.active.token, stage: "create-pending", created: null } }, "create-topup-v2");
+    }
     if (type === "dispatch-topup") { object(event, ["type"]); require(p?.kind === "topup-v1" && p.stage === "prepared", "invalid-transition"); return commit(s, { pending: { ...p, stage: "create-dispatched" } }, "create-topup-v1"); }
     if (type === "begin-pickup") { object(event, ["type"]); require(p?.kind === "registration-v2" && ["paid", "pickup-pending"].includes(p.stage), "invalid-transition"); return p.stage === "pickup-pending" ? unchanged(s) : commit(s, { pending: { ...p, stage: "pickup-pending" } }, "pickup-v2"); }
     if (type === "uncertain") { const e = object(event, ["type", "ticket"]); checkTicket(s, e.ticket); return unchanged(s); }
     const e = object(event, ["type", "ticket", "response"]);
+    if (type === "created-topup-v2") {
+      checkTicket(s, e.ticket, "create-topup-v2"); require(p?.kind === "topup-v2");
+      const created = parseCreditsTopupCreatedV2(e.response, { creationId: p.operationId, productId: s.productId, deviceId: s.deviceId, serviceOrigin: s.serviceOrigin });
+      require(created && isCreditsClaimId(created.binding.claimId));
+      return commit(s, { pending: { ...p, created, stage: "claim-pending" } });
+    }
+    if (type === "status-topup-v2") {
+      checkTicket(s, e.ticket, "status-topup-v2"); require(p?.kind === "topup-v2" && p.created);
+      const response = parseCreditsTopupStatusV2(e.response, { claimId: p.created.binding.claimId, createdAt: p.created.createdAt, expiresAt: p.created.expiresAt }); require(response);
+      if (response.state === "pending" || (response.state === "expired" && p.stage === "expired")) return unchanged(s);
+      return response.state === "expired" ? commit(s, { pending: { ...p, stage: "expired" } })
+        : commit(s, { pending: null, generation: nextGeneration(s) });
+    }
     if (type === "created-v2") {
       checkTicket(s, e.ticket, "create-v2"); require(p?.kind === "registration-v2"); const body = creation(p.canonicalCreateBody, s);
       const created = parseCreditsClaimCreatedV2(e.response, { creationId: body.creationId, productId: s.productId, deviceId: s.deviceId, serviceOrigin: s.serviceOrigin }); require(created);

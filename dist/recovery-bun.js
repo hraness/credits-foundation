@@ -5,7 +5,64 @@ import { constants as fsFlags, closeSync, fsyncSync, fstatSync, lstatSync, mkdir
 import { createHash } from "crypto";
 import { join } from "path";
 
+// src/internal.ts
+var UNSAFE_TEXT = new RegExp("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]", "u");
+var LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+var PRODUCT_ID = /^[a-z][a-z0-9-]{0,47}$/u;
+var CLAIM_ID = /^[A-Za-z0-9_-]{1,64}$/u;
+var PACK_ID = /^[A-Za-z0-9_-]{1,32}$/u;
+var OPERATION = /^[a-z][a-z0-9_-]{0,63}$/u;
+var DEVICE_TOKEN = /^cr_dev_[A-Za-z0-9_-]{43}$/u;
+var CLAIM_SECRET = /^cr_clm_[A-Za-z0-9_-]{43}$/u;
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+var USD_STRING = /^-?\d{1,10}\.\d{2}$/u;
+var TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u;
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function shape(value, required, optional = []) {
+  if (!record(value))
+    return false;
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined);
+  if (keys.length > required.length + optional.length)
+    return false;
+  for (const key of required)
+    if (!keys.includes(key))
+      return false;
+  for (const key of keys)
+    if (!required.includes(key) && !optional.includes(key))
+      return false;
+  return true;
+}
+function plainText(value, max) {
+  return typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value && !UNSAFE_TEXT.test(value);
+}
+function safeInteger(value, min, max) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+}
+function safeUrl(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048 || UNSAFE_TEXT.test(value) || /\s/u.test(value))
+    return false;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.username !== "" || url.password !== "")
+    return false;
+  return url.protocol === "https:" || url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname);
+}
+function origin(value) {
+  return safeUrl(value) && new URL(value).origin === value;
+}
+function timestamp(value) {
+  return typeof value === "string" && TIMESTAMP.test(value) && Number.isFinite(Date.parse(value));
+}
+
 // src/pickup-v2.ts
+var CREDITS_TOPUP_CREATE_V2 = "hraness-credits-topup-create-v2";
+var CREDITS_TOPUP_CREATED_V2 = "hraness-credits-topup-created-v2";
 var CREDITS_CLAIM_CREATE_V2 = "hraness-credits-claim-create-v2";
 var CREDITS_CLAIM_CREATED_V2 = "hraness-credits-claim-created-v2";
 var CREDITS_PICKUP_RESPONSE_V2 = "hraness-credits-pickup-response-v2";
@@ -25,7 +82,7 @@ var ERROR_STATUS = Object.freeze({
 var PRODUCT = /^[a-z0-9_-]{1,32}$/u;
 var CLAIM = /^[A-Za-z0-9_-]{1,128}$/u;
 var GUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
-var UUID = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
+var UUID2 = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
 var EMAIL = /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/u;
 var UNSAFE_DISPLAY = new RegExp("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]", "u");
 var operations = ["status", "credential", "pickup", "ack"];
@@ -153,7 +210,7 @@ function parsed(input, maximumBytes, read) {
     return null;
   }
 }
-function shape(value, required, optional = []) {
+function shape2(value, required, optional = []) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return fail();
   const row = value, keys = Object.keys(row);
@@ -170,23 +227,28 @@ function displayText(value, maximum) {
   const result = text(value, maximum);
   return UNSAFE_DISPLAY.test(result) ? fail() : result;
 }
+function integer(value, minimum = Number.MIN_SAFE_INTEGER, maximum = Number.MAX_SAFE_INTEGER) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum)
+    return fail();
+  return value;
+}
 function choice(value, choices) {
   return typeof value === "string" && choices.includes(value) ? value : fail();
 }
 function binding(value, devicePattern = GUID) {
-  const row = shape(value, ["claimId", "productId", "deviceId"]);
+  const row = shape2(value, ["claimId", "productId", "deviceId"]);
   return { claimId: text(row.claimId, 128, CLAIM), productId: text(row.productId, 32, PRODUCT), deviceId: text(row.deviceId, 36, devicePattern) };
 }
 function sameBinding(a, b) {
   return a.claimId === b.claimId && a.productId === b.productId && a.deviceId === b.deviceId;
 }
-function origin(value) {
+function origin2(value) {
   const raw = text(value, 2048), url = new URL(raw);
   if (url.origin !== raw || url.username || url.password || url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
     return fail();
   return raw;
 }
-function timestamp(value) {
+function timestamp2(value) {
   const raw = text(value, CREDITS_V2_MAX_RESPONSE_BYTES);
   const match = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.exec(raw);
   if (!match)
@@ -197,43 +259,84 @@ function timestamp(value) {
     return fail();
   return raw;
 }
+function readCreation(input, schemaVersion) {
+  const row = shape2(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
+  if (row.schemaVersion !== schemaVersion)
+    return fail();
+  const device = shape2(row.device, ["id"], ["label"]);
+  return {
+    schemaVersion,
+    creationId: text(row.creationId, 36, UUID2),
+    product: text(row.product, 32, PRODUCT),
+    device: { id: text(device.id, 36, UUID2), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
+    ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
+    ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
+  };
+}
 function parseCreditsClaimCreateV2(value) {
-  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => {
-    const row = shape(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
-    if (row.schemaVersion !== CREDITS_CLAIM_CREATE_V2)
-      return fail();
-    const device = shape(row.device, ["id"], ["label"]);
-    return {
-      schemaVersion: CREDITS_CLAIM_CREATE_V2,
-      creationId: text(row.creationId, 36, UUID),
-      product: text(row.product, 32, PRODUCT),
-      device: { id: text(device.id, 36, UUID), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
-      ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
-      ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
-    };
-  });
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => readCreation(input, CREDITS_CLAIM_CREATE_V2));
+}
+function parseCreditsTopupCreateV2(value) {
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => readCreation(input, CREDITS_TOPUP_CREATE_V2));
+}
+function readCreated(input, expected, schemaVersion) {
+  const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
+  const creationId = text(e.creationId, 36, UUID2), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID2);
+  const serviceOrigin = origin2(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
+  const row = shape2(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
+  const bound = binding(row.binding, UUID2), createdAt = timestamp2(row.createdAt), expiresAt = timestamp2(row.expiresAt);
+  const payUrl = text(row.payUrl, 2048);
+  if (row.schemaVersion !== schemaVersion || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+    return fail();
+  return { schemaVersion, creationId, binding: bound, createdAt, expiresAt, payUrl };
 }
 function parseCreditsClaimCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => readCreated(input, expected, CREDITS_CLAIM_CREATED_V2));
+}
+function parseCreditsTopupCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => readCreated(input, expected, CREDITS_TOPUP_CREATED_V2));
+}
+function parseCreditsTopupStatusV2(value, expected) {
   return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
-    const e = shape(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
-    const creationId = text(e.creationId, 36, UUID), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID);
-    const serviceOrigin = origin(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
-    const row = shape(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
-    const bound = binding(row.binding, UUID), createdAt = timestamp(row.createdAt), expiresAt = timestamp(row.expiresAt);
-    const payUrl = text(row.payUrl, 2048);
-    if (row.schemaVersion !== CREDITS_CLAIM_CREATED_V2 || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["claimId", "createdAt", "expiresAt"]);
+    const claimId = text(e.claimId, 64, CLAIM), createdAt = timestamp2(e.createdAt), expiresAt = timestamp2(e.expiresAt);
+    if (Date.parse(expiresAt) <= Date.parse(createdAt))
       return fail();
-    return { schemaVersion: CREDITS_CLAIM_CREATED_V2, creationId, binding: bound, createdAt, expiresAt, payUrl };
+    const row = shape2(input, ["schemaVersion", "claimId", "state", "expiresAt"], ["paidAt", "balance"]);
+    const state = choice(row.state, ["pending", "paid", "expired"]);
+    if (row.schemaVersion !== "hraness-credits-claim-status-v1" || row.claimId !== claimId || row.expiresAt !== expiresAt || !timestamp(row.expiresAt) || state === "paid" !== "paidAt" in row)
+      return fail();
+    const paidAt = "paidAt" in row ? timestamp2(row.paidAt) : undefined;
+    if (paidAt !== undefined && (!timestamp(paidAt) || Date.parse(paidAt) < Date.parse(createdAt)))
+      return fail();
+    let balance;
+    if ("balance" in row) {
+      const money = shape2(row.balance, ["microUsd", "credits", "usd"]);
+      const microUsd = integer(money.microUsd, -1000000000000000, 1000000000000000), credits = integer(money.credits), usd = text(money.usd, 32);
+      const amount = BigInt(microUsd), magnitude = amount < 0n ? -amount : amount;
+      const projectedUsd = `${amount < 0n ? "-" : ""}${magnitude / 1000000n}.${String(magnitude % 1000000n / 10000n).padStart(2, "0")}`;
+      if (credits !== Number(amount / 10000n) || usd !== projectedUsd)
+        return fail();
+      balance = { microUsd, credits, usd };
+    }
+    return {
+      schemaVersion: "hraness-credits-claim-status-v1",
+      claimId,
+      state,
+      expiresAt,
+      ...paidAt === undefined ? {} : { paidAt },
+      ...balance === undefined ? {} : { balance }
+    };
   });
 }
 function parseCreditsPickupResponseV2(value, expected) {
   return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
-    const e = shape(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["operation", "binding", "pickupId"]);
+    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["operation", "binding", "pickupId"]);
     const operation = choice(e.operation, operations), expectedBinding = binding(e.binding);
     const expectedPickup = e.pickupId === null ? null : text(e.pickupId, 36, GUID);
     if (expectedPickup === null && operation !== "status")
       return fail();
-    const row = shape(input, ["schemaVersion", "operation", "binding", "payment", "pickupState", "pickupId", "usable"]);
+    const row = shape2(input, ["schemaVersion", "operation", "binding", "payment", "pickupState", "pickupId", "usable"]);
     const bound = binding(row.binding), payment = choice(row.payment, ["pending", "paid", "expired"]);
     const pickupState = choice(row.pickupState, ["unregistered", "registered", "acknowledged", "revoked"]);
     const pickupId = row.pickupId === null ? null : text(row.pickupId, 36, GUID);
@@ -242,61 +345,6 @@ function parseCreditsPickupResponseV2(value, expected) {
       return fail();
     return { schemaVersion: CREDITS_PICKUP_RESPONSE_V2, operation, binding: bound, payment, pickupState, pickupId, usable };
   });
-}
-
-// src/internal.ts
-var UNSAFE_TEXT = new RegExp("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]", "u");
-var LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-var PRODUCT_ID = /^[a-z][a-z0-9-]{0,47}$/u;
-var CLAIM_ID = /^[A-Za-z0-9_-]{1,64}$/u;
-var PACK_ID = /^[A-Za-z0-9_-]{1,32}$/u;
-var OPERATION = /^[a-z][a-z0-9_-]{0,63}$/u;
-var DEVICE_TOKEN = /^cr_dev_[A-Za-z0-9_-]{43}$/u;
-var CLAIM_SECRET = /^cr_clm_[A-Za-z0-9_-]{43}$/u;
-var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-var USD_STRING = /^-?\d{1,10}\.\d{2}$/u;
-var TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u;
-function record(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function shape2(value, required, optional = []) {
-  if (!record(value))
-    return false;
-  const keys = Object.keys(value).filter((key) => value[key] !== undefined);
-  if (keys.length > required.length + optional.length)
-    return false;
-  for (const key of required)
-    if (!keys.includes(key))
-      return false;
-  for (const key of keys)
-    if (!required.includes(key) && !optional.includes(key))
-      return false;
-  return true;
-}
-function plainText(value, max) {
-  return typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value && !UNSAFE_TEXT.test(value);
-}
-function safeInteger(value, min, max) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
-}
-function safeUrl(value) {
-  if (typeof value !== "string" || value.length === 0 || value.length > 2048 || UNSAFE_TEXT.test(value) || /\s/u.test(value))
-    return false;
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  if (url.username !== "" || url.password !== "")
-    return false;
-  return url.protocol === "https:" || url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname);
-}
-function origin2(value) {
-  return safeUrl(value) && new URL(value).origin === value;
-}
-function timestamp2(value) {
-  return typeof value === "string" && TIMESTAMP.test(value) && Number.isFinite(Date.parse(value));
 }
 
 // src/index.ts
@@ -314,28 +362,28 @@ var isCreditsPackId = (value) => typeof value === "string" && PACK_ID.test(value
 var isCreditsOperation = (value) => typeof value === "string" && OPERATION.test(value);
 var isCreditsDeviceToken = (value) => typeof value === "string" && DEVICE_TOKEN.test(value);
 var isCreditsClaimSecret = (value) => typeof value === "string" && CLAIM_SECRET.test(value);
-var isCreditsTimestamp = (value) => timestamp2(value);
+var isCreditsTimestamp = (value) => timestamp(value);
 var isMicroUsd = (value) => safeInteger(value, -MAX_MICRO_USD, MAX_MICRO_USD);
 var isCredits = (value) => safeInteger(value, -MAX_MICRO_USD / MICRO_USD_PER_CREDIT, MAX_MICRO_USD / MICRO_USD_PER_CREDIT);
 var isUsdString = (value) => typeof value === "string" && USD_STRING.test(value);
 var isUsdNumber = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1e6 && Math.abs(value * 100 - Math.round(value * 100)) < 0.000001;
 function parseProduct(value) {
-  if (!shape2(value, ["id", "name"]) || !isCreditsProductId(value.id) || !plainText(value.name, 80))
+  if (!shape(value, ["id", "name"]) || !isCreditsProductId(value.id) || !plainText(value.name, 80))
     return null;
   return Object.freeze({ id: value.id, name: value.name });
 }
 function parseMoney(value) {
-  if (!shape2(value, ["microUsd", "credits", "usd"]) || !isMicroUsd(value.microUsd) || !isCredits(value.credits) || !isUsdString(value.usd))
+  if (!shape(value, ["microUsd", "credits", "usd"]) || !isMicroUsd(value.microUsd) || !isCredits(value.credits) || !isUsdString(value.usd))
     return null;
   return Object.freeze({ microUsd: value.microUsd, credits: value.credits, usd: value.usd });
 }
 function parsePrice(value) {
-  if (!shape2(value, ["microUsd", "usd"]) || !isMicroUsd(value.microUsd) || !isUsdString(value.usd))
+  if (!shape(value, ["microUsd", "usd"]) || !isMicroUsd(value.microUsd) || !isUsdString(value.usd))
     return null;
   return Object.freeze({ microUsd: value.microUsd, usd: value.usd });
 }
 function parsePack(value) {
-  if (!shape2(value, ["id", "usd", "credits", "bonusCredits"], ["label"]) || !isCreditsPackId(value.id) || !isUsdNumber(value.usd) || !isCredits(value.credits) || value.credits < 0 || !isCredits(value.bonusCredits) || value.bonusCredits < 0 || value.label !== undefined && !plainText(value.label, 80))
+  if (!shape(value, ["id", "usd", "credits", "bonusCredits"], ["label"]) || !isCreditsPackId(value.id) || !isUsdNumber(value.usd) || !isCredits(value.credits) || value.credits < 0 || !isCredits(value.bonusCredits) || value.bonusCredits < 0 || value.label !== undefined && !plainText(value.label, 80))
     return null;
   return Object.freeze({
     id: value.id,
@@ -358,7 +406,7 @@ function parsePacks(value) {
   return Object.freeze(packs);
 }
 function parseCreditsClaim(value) {
-  if (!shape2(value, ["schemaVersion", "claimId", "url", "expiresAt", "product", "packs", "suggestedPackId"], ["claimSecret", "balance"]) || value.schemaVersion !== CREDITS_CLAIM_SCHEMA || !isCreditsClaimId(value.claimId) || !safeUrl(value.url) || !timestamp2(value.expiresAt) || !isCreditsPackId(value.suggestedPackId) || value.claimSecret !== undefined && !isCreditsClaimSecret(value.claimSecret))
+  if (!shape(value, ["schemaVersion", "claimId", "url", "expiresAt", "product", "packs", "suggestedPackId"], ["claimSecret", "balance"]) || value.schemaVersion !== CREDITS_CLAIM_SCHEMA || !isCreditsClaimId(value.claimId) || !safeUrl(value.url) || !timestamp(value.expiresAt) || !isCreditsPackId(value.suggestedPackId) || value.claimSecret !== undefined && !isCreditsClaimSecret(value.claimSecret))
     return null;
   const product = parseProduct(value.product);
   const packs = parsePacks(value.packs);
@@ -378,7 +426,7 @@ function parseCreditsClaim(value) {
   });
 }
 function parseCreditsClaimStatus(value) {
-  if (!shape2(value, ["schemaVersion", "claimId", "state", "expiresAt"], ["paidAt", "balance", "token"]) || value.schemaVersion !== CREDITS_CLAIM_STATUS_SCHEMA || !isCreditsClaimId(value.claimId) || !CLAIM_STATES.includes(value.state) || !timestamp2(value.expiresAt) || value.paidAt !== undefined && !timestamp2(value.paidAt) || value.token !== undefined && !isCreditsDeviceToken(value.token))
+  if (!shape(value, ["schemaVersion", "claimId", "state", "expiresAt"], ["paidAt", "balance", "token"]) || value.schemaVersion !== CREDITS_CLAIM_STATUS_SCHEMA || !isCreditsClaimId(value.claimId) || !CLAIM_STATES.includes(value.state) || !timestamp(value.expiresAt) || value.paidAt !== undefined && !timestamp(value.paidAt) || value.token !== undefined && !isCreditsDeviceToken(value.token))
     return null;
   const balance = value.balance === undefined ? undefined : parseMoney(value.balance);
   if (balance === null)
@@ -394,7 +442,7 @@ function parseCreditsClaimStatus(value) {
   });
 }
 function parseCreditsRateCard(value) {
-  if (!shape2(value, ["product", "packs", "suggestedPackId", "minUsd", "maxUsd", "operations"]) || !isCreditsPackId(value.suggestedPackId) || !isUsdNumber(value.minUsd) || !isUsdNumber(value.maxUsd) || !record(value.operations))
+  if (!shape(value, ["product", "packs", "suggestedPackId", "minUsd", "maxUsd", "operations"]) || !isCreditsPackId(value.suggestedPackId) || !isUsdNumber(value.minUsd) || !isUsdNumber(value.maxUsd) || !record(value.operations))
     return null;
   const product = parseProduct(value.product);
   const packs = parsePacks(value.packs);
@@ -406,7 +454,7 @@ function parseCreditsRateCard(value) {
   const operations2 = {};
   for (const name of names) {
     const operation = value.operations[name];
-    if (!isCreditsOperation(name) || !shape2(operation, ["label"], ["unitPrice"]) || !plainText(operation.label, 80))
+    if (!isCreditsOperation(name) || !shape(operation, ["label"], ["unitPrice"]) || !plainText(operation.label, 80))
       return null;
     const unitPrice = operation.unitPrice === undefined ? undefined : parsePrice(operation.unitPrice);
     if (unitPrice === null || unitPrice !== undefined && unitPrice.microUsd < 0)
@@ -429,7 +477,7 @@ var RECOVERY_MAX_BYTES = 32768;
 var PRODUCT2 = /^[a-z0-9_-]{1,32}$/u;
 var UUID3 = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
 var CLAIM2 = /^[A-Za-z0-9_-]{1,128}$/u;
-var ACTIONS = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1"];
+var ACTIONS = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1", "create-topup-v2", "status-topup-v2"];
 var encoder2 = new TextEncoder;
 
 class Invalid extends Error {
@@ -595,9 +643,14 @@ function topupBody(body, s, operationId) {
   require2(encoder2.encode(out).length <= 4096);
   return out;
 }
+function topupV2Body(body, s, operationId) {
+  const parsed2 = parseCreditsTopupCreateV2(body);
+  require2(parsed2 && parsed2.product === s.productId && parsed2.device.id === s.deviceId && parsed2.creationId === operationId);
+  return parsed2;
+}
 function readState(v) {
   const r = object(v, ["schemaVersion", "databaseId", "productId", "serviceOrigin", "deviceId", "revision", "generation", "bootstrap", "active", "pending"]);
-  require2(r.schemaVersion === RECOVERY_STATE_SCHEMA && origin2(r.serviceOrigin));
+  require2(r.schemaVersion === RECOVERY_STATE_SCHEMA && origin(r.serviceOrigin));
   const state = {
     schemaVersion: RECOVERY_STATE_SCHEMA,
     databaseId: text2(r.databaseId, 36, UUID3),
@@ -616,11 +669,11 @@ function readState(v) {
     const source = choice2(a.source, ["legacy", "pickup-v2"]);
     require2(source === "legacy" === (a.binding === null));
     if (source === "legacy")
-      require2(UUID2.test(state.deviceId) && isCreditsProductId(state.productId));
+      require2(UUID.test(state.deviceId) && isCreditsProductId(state.productId));
     state.active = { token: a.token, source, binding: a.binding === null ? null : bound(a.binding, state.productId, state.deviceId) };
   }
   if (r.pending !== null) {
-    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim"]).kind;
+    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim", "originalToken"]).kind;
     if (kind === "registration-v2") {
       require2(state.active === null && state.bootstrap === "active");
       const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claimSecret", "pickupId", "candidateToken", "created"]);
@@ -630,6 +683,21 @@ function readState(v) {
       const created = p.created === null ? null : parseCreditsClaimCreatedV2(p.created, { creationId: body.creationId, productId: state.productId, deviceId: state.deviceId, serviceOrigin: state.serviceOrigin });
       require2(stage === "create-pending" === (p.created === null) && (p.created === null || created !== null));
       state.pending = { kind, operationId: text2(p.operationId, 36, UUID3), canonicalCreateBody: bodyText, stage, created, claimSecret: p.claimSecret, pickupId: text2(p.pickupId, 36, UUID3), candidateToken: p.candidateToken };
+    } else if (kind === "topup-v2") {
+      require2(state.active !== null && state.bootstrap === "active");
+      const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "originalToken", "created"]);
+      const operationId = text2(p.operationId, 36, UUID3), bodyText = text2(p.canonicalCreateBody, 4096);
+      const body = topupV2Body(bodyText, state, operationId);
+      require2(canonical(body) === bodyText && p.originalToken === state.active.token);
+      const stage = choice2(p.stage, ["create-pending", "claim-pending", "expired"]);
+      const created = p.created === null ? null : parseCreditsTopupCreatedV2(p.created, {
+        creationId: operationId,
+        productId: state.productId,
+        deviceId: state.deviceId,
+        serviceOrigin: state.serviceOrigin
+      });
+      require2(stage === "create-pending" === (p.created === null) && (p.created === null || created && isCreditsClaimId(created.binding.claimId)));
+      state.pending = { kind, operationId, canonicalCreateBody: bodyText, originalToken: state.active.token, stage, created };
     } else {
       require2(kind === "topup-v1" && state.active !== null);
       const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claim"]), operationId = text2(p.operationId, 36, UUID3);
@@ -685,7 +753,7 @@ function prepareRecoveryState(input) {
       return frozen(state);
     }
     const legacy = object(r.legacy, ["schemaVersion", "product", "deviceId"], ["token", "pendingClaim", "rateCard"]);
-    require2(legacy.schemaVersion === CREDITS_STATE_SCHEMA && legacy.product === state.productId && isCreditsProductId(legacy.product) && legacy.deviceId === state.deviceId && UUID2.test(state.deviceId));
+    require2(legacy.schemaVersion === CREDITS_STATE_SCHEMA && legacy.product === state.productId && isCreditsProductId(legacy.product) && legacy.deviceId === state.deviceId && UUID.test(state.deviceId));
     if ("rateCard" in legacy) {
       const cache = object(legacy.rateCard, ["fetchedAt", "body"]);
       counter(cache.fetchedAt);
@@ -719,6 +787,8 @@ function allowed(s, action, dispatchReply = false) {
   const p = s.pending;
   if (p.kind === "topup-v1")
     return action === "status-topup-v1" ? p.stage === "claim-pending" : action === "create-topup-v1" && dispatchReply && p.stage === "create-dispatched";
+  if (p.kind === "topup-v2")
+    return action === "create-topup-v2" ? p.stage === "create-pending" : action === "status-topup-v2" && ["claim-pending", "expired"].includes(p.stage);
   return action === "create-v2" ? p.stage === "create-pending" : action === "status-v2" ? !["create-pending", "expired", "revoked"].includes(p.stage) : action === "pickup-v2" ? p.stage === "pickup-pending" : (action === "ack-v2" || action === "credential-v2") && p.stage === "ack-pending";
 }
 function ticket(s, action) {
@@ -789,6 +859,16 @@ function transitionRecoveryState(stateInput, eventInput) {
       }
       return commit(s, { pending: { kind: "topup-v1", operationId, canonicalCreateBody: body, stage: "prepared", claim: null } });
     }
+    if (type === "prepare-topup-v2") {
+      const e2 = object(event, ["type", "operationId", "body"]);
+      require2(s.active, "invalid-transition");
+      const operationId = text2(e2.operationId, 36, UUID3), body = canonical(topupV2Body(e2.body, s, operationId));
+      if (p) {
+        require2(p.kind === "topup-v2" && p.operationId === operationId && p.canonicalCreateBody === body && p.originalToken === s.active.token, "invalid-transition");
+        return unchanged(s);
+      }
+      return commit(s, { pending: { kind: "topup-v2", operationId, canonicalCreateBody: body, originalToken: s.active.token, stage: "create-pending", created: null } }, "create-topup-v2");
+    }
     if (type === "dispatch-topup") {
       object(event, ["type"]);
       require2(p?.kind === "topup-v1" && p.stage === "prepared", "invalid-transition");
@@ -805,6 +885,22 @@ function transitionRecoveryState(stateInput, eventInput) {
       return unchanged(s);
     }
     const e = object(event, ["type", "ticket", "response"]);
+    if (type === "created-topup-v2") {
+      checkTicket(s, e.ticket, "create-topup-v2");
+      require2(p?.kind === "topup-v2");
+      const created = parseCreditsTopupCreatedV2(e.response, { creationId: p.operationId, productId: s.productId, deviceId: s.deviceId, serviceOrigin: s.serviceOrigin });
+      require2(created && isCreditsClaimId(created.binding.claimId));
+      return commit(s, { pending: { ...p, created, stage: "claim-pending" } });
+    }
+    if (type === "status-topup-v2") {
+      checkTicket(s, e.ticket, "status-topup-v2");
+      require2(p?.kind === "topup-v2" && p.created);
+      const response = parseCreditsTopupStatusV2(e.response, { claimId: p.created.binding.claimId, createdAt: p.created.createdAt, expiresAt: p.created.expiresAt });
+      require2(response);
+      if (response.state === "pending" || response.state === "expired" && p.stage === "expired")
+        return unchanged(s);
+      return response.state === "expired" ? commit(s, { pending: { ...p, stage: "expired" } }) : commit(s, { pending: null, generation: nextGeneration(s) });
+    }
     if (type === "created-v2") {
       checkTicket(s, e.ticket, "create-v2");
       require2(p?.kind === "registration-v2");
@@ -928,7 +1024,7 @@ function locationInput(value) {
   const trustedBase = boundedText(row.trustedBase, 4096), productId = boundedText(row.productId, 32);
   need(trustedBase.startsWith("/") && !/[\\\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(trustedBase));
   need(trustedBase === "/" || !trustedBase.endsWith("/") && trustedBase.split("/").slice(1).every((part) => part !== "" && part !== "." && part !== ".."));
-  need(PRODUCT3.test(productId) && origin2(row.serviceOrigin));
+  need(PRODUCT3.test(productId) && origin(row.serviceOrigin));
   const directory = directoryParts(row.directory);
   need(encoder3.encode([trustedBase, ...directory, `${productId}.v2.sqlite-journal`].join("/")).length <= 4096);
   return Object.freeze({ trustedBase, directory, productId, serviceOrigin: row.serviceOrigin });

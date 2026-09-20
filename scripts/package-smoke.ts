@@ -44,7 +44,8 @@ import { buildCreditsRequiredEnvelope, creditsProtocol, priceCostPlus, priceUnit
 import { parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2, parseCreditsPickupRequestV2, parseCreditsPickupResponseV2, parseCreditsBalanceV2, parseCreditsErrorV2, type CreditsCreationExpectationV2, type CreditsPickupExpectationV2, type CreditsBalanceV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
 import { ceilingFor, createCreditsClient, type CreditsClientResult, type CreditsHold, type CreditsSettlement, type CreditsRelease, type CreditsTerminalHoldState } from '@hraness/credits-foundation/server';
-import { prepareRecoveryState, readRecoveryToken, type RecoveryState } from '@hraness/credits-foundation/recovery';
+import { parseCreditsTopupCreateV2, parseCreditsTopupCreatedV2, parseCreditsTopupStatusV2, type CreditsTopupCreateV2, type CreditsTopupCreatedV2, type CreditsTopupStatusV2 } from '@hraness/credits-foundation';
+import { prepareRecoveryState, readRecoveryToken, type RecoveryState, type RecoveryTopupV2, type RecoveryEvent, type RecoveryAction } from '@hraness/credits-foundation/recovery';
 import { bootstrapRecoveryStore, checkRecoveryFence, commitRecoveryEvent, readRecoveryStore, type RecoveryLocation, type RecoveryStoreResult } from '@hraness/credits-foundation/recovery/bun';
 declare global { namespace NodeJS { interface ProcessEnv { readonly NODE_ENV: 'development' | 'production' | 'test'; } } }
 const profile: CreditsProductProfile = { id: 'peopleblade', name: 'PeopleBlade', command: ['peopleblade'] };
@@ -59,6 +60,13 @@ parseCreditsClaimCreateV2({});
 parseCreditsClaimCreatedV2({}, expected);
 parseCreditsPickupRequestV2({});
 parseCreditsPickupResponseV2({}, pickup);
+const topupRequest: CreditsTopupCreateV2 | null = parseCreditsTopupCreateV2({});
+const topupCreated: CreditsTopupCreatedV2 | null = parseCreditsTopupCreatedV2({}, expected);
+const topupStatus: CreditsTopupStatusV2 | null = parseCreditsTopupStatusV2({}, { claimId: 'clm_1', createdAt: '2026-09-20T00:00:00Z', expiresAt: '2026-09-21T00:00:00Z' });
+const topupEvent: RecoveryEvent = { type: 'prepare-topup-v2', operationId: expected.creationId, body: topupRequest };
+const topupAction: RecoveryAction = 'create-topup-v2';
+const pendingTopup: RecoveryTopupV2 | null = null;
+void topupCreated; void topupStatus; void topupEvent; void topupAction; void pendingTopup;
 const balance: CreditsBalanceV2 | null = parseCreditsBalanceV2({}, expected.productId);
 void balance;
 parseCreditsErrorV2({ error: 'not_found' }, 404);
@@ -86,7 +94,7 @@ ceilingFor(${rateCard}, 'enrich_contact', 2);
   const entry = join(scratch, "consumer.mjs");
   await writeFile(entry, `
 import assert from 'node:assert/strict';
-import { buildCreditsRequiredEnvelope, formatUsd, priceUnit, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2 } from '@hraness/credits-foundation';
+import { buildCreditsRequiredEnvelope, formatUsd, priceUnit, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2, parseCreditsTopupCreateV2, parseCreditsTopupCreatedV2, parseCreditsTopupStatusV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
 import { ceilingFor, createCreditsClient } from '@hraness/credits-foundation/server';
 import { parseRecoveryState } from '@hraness/credits-foundation/recovery';
@@ -106,6 +114,15 @@ const expected = { creationId: create.creationId, productId: create.product, dev
 const created = parseCreditsClaimCreatedV2(createdWire, expected);
 assert.ok(created && Object.isFrozen(created.binding));
 assert.equal(parseCreditsClaimCreatedV2({ ...createdWire, payUrl: 'https://elsewhere.invalid/t/clm_1' }, expected), null);
+const topupBody = { ...create, schemaVersion: 'hraness-credits-topup-create-v2' };
+assert.deepEqual(parseCreditsTopupCreateV2(topupBody), topupBody);
+assert.equal(parseCreditsTopupCreateV2(create), null);
+const topupWire = { ...createdWire, schemaVersion: 'hraness-credits-topup-created-v2' };
+assert.deepEqual(parseCreditsTopupCreatedV2(topupWire, expected), topupWire);
+assert.equal(parseCreditsTopupCreatedV2(createdWire, expected), null);
+const topupStatus = { schemaVersion: 'hraness-credits-claim-status-v1', claimId: 'clm_1', state: 'paid', expiresAt: createdWire.expiresAt, paidAt: '2026-09-22T00:00:00.000Z' };
+assert.deepEqual(parseCreditsTopupStatusV2(topupStatus, { claimId: 'clm_1', createdAt: createdWire.createdAt, expiresAt: createdWire.expiresAt }), topupStatus);
+assert.equal(parseCreditsTopupStatusV2({ ...topupStatus, token: 'cr_dev_' + 'T'.repeat(43) }, { claimId: 'clm_1', createdAt: createdWire.createdAt, expiresAt: createdWire.expiresAt }), null);
 const protocol = await runCreditsCommand(profile, ['protocol', '--json'], io);
 assert.equal(protocol.exitCode, 0);
 assert.equal(JSON.parse(protocol.stdout).schemaVersion, 'hraness-credits-protocol-v1');

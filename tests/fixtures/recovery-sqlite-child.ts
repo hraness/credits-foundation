@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 
 const [mode, base] = process.argv.slice(2);
-const modes = ["hot", "umask", "before-commit", "after-commit", "prepared-commit", "marker-temp", "marker-rename", "marker-dir-sync", "active-commit", "close-failure", "fence-failure", "commit-before-failure", "commit-after-failure", "marker-sync-failure", "marker-rename-failure", "marker-dir-failure", "lock-fstat-failure", "temp-fstat-failure", "full", "unknown-fs", "unknown-runtime", "read"];
+const modes = ["topup-before-commit", "topup-after-commit", "topup-commit-after-failure","hot", "umask", "before-commit", "after-commit", "prepared-commit", "marker-temp", "marker-rename", "marker-dir-sync", "active-commit", "close-failure", "fence-failure", "commit-before-failure", "commit-after-failure", "marker-sync-failure", "marker-rename-failure", "marker-dir-failure", "lock-fstat-failure", "temp-fstat-failure", "full", "unknown-fs", "unknown-runtime", "read"];
 if (!mode || !modes.includes(mode) || !base || !base.startsWith("/") || !base.split("/").at(-1)?.startsWith("credits-sqlite-test-") || fs.realpathSync(base) !== base || (fs.lstatSync(base).mode & 0o777) !== 0o700) throw new Error("Invalid fixture invocation.");
 const loc = { trustedBase: base, directory: ["credits"], productId: "peopleblade", serviceOrigin: "https://credits.example" };
 const dir = join(base, "credits"), dbPath = join(dir, "peopleblade.v2.sqlite"), markerPath = join(dir, "peopleblade.json");
@@ -41,20 +41,21 @@ if (["marker-temp", "marker-rename", "marker-dir-sync", "marker-sync-failure", "
   }));
 }
 if (mode === "unknown-runtime") Object.defineProperty(process, "platform", { value: "linux" });
+const commitMode = mode.startsWith("topup-") ? mode.slice(6) : mode;
 const originalExec = Database.prototype.exec, originalClose = Database.prototype.close;
 let commits = 0;
 Database.prototype.exec = function (...args: Parameters<typeof originalExec>) {
   const isTarget = this.filename === dbPath, sql = args[0];
   if (isTarget && sql === "COMMIT") {
     commits++;
-    if (mode === "before-commit") stop(mode);
+    if (commitMode === "before-commit") stop(mode);
     if (mode === "commit-before-failure") throw new Error("Synthetic secret must not escape.");
   }
   const result = originalExec.apply(this, args);
   if (isTarget && mode === "full" && typeof sql === "string" && sql.startsWith("CREATE TABLE recovery")) originalExec.call(this, "PRAGMA max_page_count=2");
   if (isTarget && sql === "COMMIT") {
-    if (mode === "after-commit" || (mode === "prepared-commit" && commits === 1) || (mode === "active-commit" && commits === 2)) stop(mode);
-    if (mode === "commit-after-failure") throw new Error("Synthetic secret must not escape.");
+    if (commitMode === "after-commit" || (mode === "prepared-commit" && commits === 1) || (mode === "active-commit" && commits === 2)) stop(mode);
+    if (commitMode === "commit-after-failure") throw new Error("Synthetic secret must not escape.");
   }
   return result;
 };
@@ -80,8 +81,9 @@ if (mode === "hot" || mode === "umask") {
   try { fs.readSync(fd, header); } finally { fs.closeSync(fd); }
   emit({ phase: "journal-held", mode: st.mode & 0o777, bytes: st.size, hotHeader: Buffer.from(header).toString("hex"), sqlite: db.query("SELECT sqlite_version() AS value").get(), sync: db.query("PRAGMA synchronous").get(), fullfsync: db.query("PRAGMA fullfsync").get() });
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10_000); process.exit(3);
-} else if (["before-commit", "after-commit", "close-failure", "fence-failure", "commit-before-failure", "commit-after-failure"].includes(mode)) {
-  const event = { type: "prepare-registration", operationId: "00000000-0000-4000-8000-000000000003", pickupId: "00000000-0000-4000-8000-000000000004", claimSecret: `cr_clm_${"s".repeat(43)}`, candidateToken: `cr_dev_${"c".repeat(43)}`,
+} else if (["before-commit", "after-commit", "close-failure", "fence-failure", "commit-before-failure", "commit-after-failure"].includes(commitMode)) {
+  const event = mode.startsWith("topup-") ? { type: "prepare-topup-v2", operationId: "00000000-0000-4000-8000-000000000003",
+    body: { schemaVersion: "hraness-credits-topup-create-v2", creationId: "00000000-0000-4000-8000-000000000003", product: loc.productId, device: { id: ids.deviceId } } } : { type: "prepare-registration", operationId: "00000000-0000-4000-8000-000000000003", pickupId: "00000000-0000-4000-8000-000000000004", claimSecret: `cr_clm_${"s".repeat(43)}`, candidateToken: `cr_dev_${"c".repeat(43)}`,
     body: { schemaVersion: "hraness-credits-claim-create-v2", creationId: "00000000-0000-4000-8000-000000000005", product: loc.productId, device: { id: ids.deviceId } } };
   const result = store.commitRecoveryEvent(loc, { databaseId: ids.databaseId, revision: 1, generation: 0 }, event);
   if (result.ok) emit({ ok: true, kind: result.value.kind }); else emit(result);

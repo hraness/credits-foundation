@@ -283,3 +283,9 @@ runtime dependencies. No test touches real user state or the network.
   follows, with the sentences it should and should not say.
 - Generated declarations in `dist/*.d.ts` are the public type surface.
 - [AGENTS.md](AGENTS.md) records the rules for changing this repository.
+
+### Replayable returning top-ups
+
+Version 0.4.0 adds pure `parseCreditsTopupCreateV2`, `parseCreditsTopupCreatedV2` and `parseCreditsTopupStatusV2` exports, plus a distinct `topup-v2` recovery state. It retains one canonical creation request and the existing device credential before dispatch, so a future transport can recover the same link after a lost reply. Late paid status clears only that pending purchase; it does not issue or rotate a token.
+
+The optional Bun store uses its existing schema and guards. Older readers reject an unfamiliar pending kind without resetting it. Existing v1 commands, uncertain v1 creation and status-only legacy migration retain their behavior. This release adds no active transport or CLI wiring and does not enable the source-disabled authority. See [recovery semantics](./docs/recovery-state.md) and [wire contracts](./docs/pickup-v2.md).

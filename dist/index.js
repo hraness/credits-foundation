@@ -75,8 +75,309 @@ function errorCode(error) {
   return record(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
+// src/pickup-v2.ts
+var CREDITS_CLAIM_CREATE_V2 = "hraness-credits-claim-create-v2";
+var CREDITS_CLAIM_CREATED_V2 = "hraness-credits-claim-created-v2";
+var CREDITS_PICKUP_REQUEST_V2 = "hraness-credits-pickup-request-v2";
+var CREDITS_PICKUP_RESPONSE_V2 = "hraness-credits-pickup-response-v2";
+var CREDITS_BALANCE_V2 = "hraness-credits-balance-v2";
+var CREDITS_V2_MAX_REQUEST_BYTES = 4096;
+var CREDITS_V2_MAX_RESPONSE_BYTES = 16384;
+var ERROR_STATUS = Object.freeze({
+  unavailable: 503,
+  unauthorized: 401,
+  not_found: 404,
+  invalid_request: 400,
+  conflict: 409,
+  expired: 410,
+  rate_limited: 429,
+  product_disabled: 503,
+  too_large: 413
+});
+var PRODUCT = /^[a-z0-9_-]{1,32}$/u;
+var CLAIM = /^[A-Za-z0-9_-]{1,128}$/u;
+var GUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+var UUID2 = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
+var HASH = /^[a-f0-9]{64}$/u;
+var EMAIL = /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/u;
+var UNSAFE_DISPLAY = new RegExp("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]", "u");
+var operations = ["status", "credential", "pickup", "ack"];
+var fail = () => {
+  throw new Error("Invalid credits v2 wire value.");
+};
+var encoder = new TextEncoder;
+function unicode(value) {
+  for (let i = 0;i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 55296 && code <= 56319) {
+      const next = value.charCodeAt(++i);
+      if (!(next >= 56320 && next <= 57343))
+        return false;
+    } else if (code >= 56320 && code <= 57343)
+      return false;
+  }
+  return true;
+}
+function uniqueJsonKeys(json) {
+  const stack = [];
+  for (let i = 0;i < json.length; i++) {
+    const c = json[i];
+    if (c === '"') {
+      const start = i++;
+      for (;i < json.length; i++) {
+        if (json[i] === "\\")
+          i++;
+        else if (json[i] === '"')
+          break;
+      }
+      const current = stack.at(-1);
+      if (current?.key) {
+        const key = JSON.parse(json.slice(start, i + 1));
+        if (current.keys.has(key))
+          fail();
+        current.keys.add(key);
+        current.key = false;
+      }
+    } else if (c === "{")
+      stack.push({ keys: new Set, key: true });
+    else if (c === "[")
+      stack.push(null);
+    else if (c === "}" || c === "]")
+      stack.pop();
+    else if (c === ",") {
+      const current = stack.at(-1);
+      if (current)
+        current.key = true;
+    }
+    if (stack.length > 8)
+      fail();
+  }
+}
+function snapshot(input, maximumBytes) {
+  if (typeof input === "string") {
+    if (input.length > maximumBytes || !unicode(input) || encoder.encode(input).length > maximumBytes)
+      fail();
+    uniqueJsonKeys(input);
+    input = JSON.parse(input);
+  }
+  let nodes = 0, characters = 0;
+  const ancestors = new Set;
+  function copy(value, depth) {
+    if (++nodes > 256 || depth > 8)
+      return fail();
+    if (value === null || typeof value === "boolean")
+      return value;
+    if (typeof value === "number")
+      return Number.isFinite(value) && !Object.is(value, -0) ? value : fail();
+    if (typeof value === "string") {
+      characters += value.length;
+      if (characters > maximumBytes || !unicode(value))
+        return fail();
+      return value;
+    }
+    if (typeof value !== "object" || ancestors.has(value))
+      return fail();
+    const array = Array.isArray(value), prototype = Object.getPrototypeOf(value);
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null)
+      return fail();
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > 64)
+      return fail();
+    const length = array ? Object.getOwnPropertyDescriptor(value, "length") : undefined;
+    if (array && (!length || !("value" in length) || !Number.isSafeInteger(length.value) || length.value < 0 || length.value > 63))
+      return fail();
+    ancestors.add(value);
+    const result2 = array ? [] : Object.create(null);
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (array && key === "length")
+        continue;
+      if (typeof key !== "string" || ["__proto__", "constructor", "prototype"].includes(key) || !descriptor || !("value" in descriptor) || !descriptor.enumerable)
+        return fail();
+      characters += key.length;
+      if (characters > maximumBytes || !unicode(key))
+        return fail();
+      if (array && key !== String(result2.length))
+        return fail();
+      result2[key] = copy(descriptor.value, depth + 1);
+    }
+    if (array && result2.length !== length.value)
+      return fail();
+    ancestors.delete(value);
+    return result2;
+  }
+  const result = copy(input, 0);
+  if (encoder.encode(JSON.stringify(result)).length > maximumBytes)
+    fail();
+  return result;
+}
+function freeze(value) {
+  if (typeof value === "object" && value !== null) {
+    for (const child of Object.values(value))
+      freeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+function parsed(input, maximumBytes, read) {
+  try {
+    return freeze(read(snapshot(input, maximumBytes)));
+  } catch {
+    return null;
+  }
+}
+function shape2(value, required, optional = []) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return fail();
+  const row = value, keys = Object.keys(row);
+  if (required.some((key) => !keys.includes(key)) || keys.some((key) => !required.includes(key) && !optional.includes(key)))
+    return fail();
+  return row;
+}
+function text(value, maximum, pattern) {
+  if (typeof value !== "string" || value.length < 1 || value.length > maximum || pattern && !pattern.test(value))
+    return fail();
+  return value;
+}
+function displayText(value, maximum) {
+  const result = text(value, maximum);
+  return UNSAFE_DISPLAY.test(result) ? fail() : result;
+}
+function integer(value, minimum = Number.MIN_SAFE_INTEGER, maximum = Number.MAX_SAFE_INTEGER) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum)
+    return fail();
+  return value;
+}
+function choice(value, choices) {
+  return typeof value === "string" && choices.includes(value) ? value : fail();
+}
+function binding(value, devicePattern = GUID) {
+  const row = shape2(value, ["claimId", "productId", "deviceId"]);
+  return { claimId: text(row.claimId, 128, CLAIM), productId: text(row.productId, 32, PRODUCT), deviceId: text(row.deviceId, 36, devicePattern) };
+}
+function sameBinding(a, b) {
+  return a.claimId === b.claimId && a.productId === b.productId && a.deviceId === b.deviceId;
+}
+function origin2(value) {
+  const raw = text(value, 2048), url = new URL(raw);
+  if (url.origin !== raw || url.username || url.password || url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
+    return fail();
+  return raw;
+}
+function timestamp2(value) {
+  const raw = text(value, CREDITS_V2_MAX_RESPONSE_BYTES);
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.exec(raw);
+  if (!match)
+    return fail();
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const days = [31, year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > days[month - 1] || !Number.isFinite(Date.parse(raw)))
+    return fail();
+  return raw;
+}
+function parseCreditsClaimCreateV2(value) {
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => {
+    const row = shape2(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
+    if (row.schemaVersion !== CREDITS_CLAIM_CREATE_V2)
+      return fail();
+    const device = shape2(row.device, ["id"], ["label"]);
+    return {
+      schemaVersion: CREDITS_CLAIM_CREATE_V2,
+      creationId: text(row.creationId, 36, UUID2),
+      product: text(row.product, 32, PRODUCT),
+      device: { id: text(device.id, 36, UUID2), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
+      ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
+      ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
+    };
+  });
+}
+function parseCreditsClaimCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
+    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
+    const creationId = text(e.creationId, 36, UUID2), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID2);
+    const serviceOrigin = origin2(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
+    const row = shape2(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
+    const bound = binding(row.binding, UUID2), createdAt = timestamp2(row.createdAt), expiresAt = timestamp2(row.expiresAt);
+    const payUrl = text(row.payUrl, 2048);
+    if (row.schemaVersion !== CREDITS_CLAIM_CREATED_V2 || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+      return fail();
+    return { schemaVersion: CREDITS_CLAIM_CREATED_V2, creationId, binding: bound, createdAt, expiresAt, payUrl };
+  });
+}
+function parseCreditsPickupRequestV2(value) {
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => {
+    const base = shape2(input, ["schemaVersion", "claimId", "operation"], ["pickupId", "tokenSha256"]);
+    const operation = choice(base.operation, operations);
+    const row = shape2(base, ["schemaVersion", "claimId", "operation", ...operation === "pickup" ? ["pickupId", "tokenSha256"] : operation === "ack" ? ["pickupId"] : []]);
+    if (row.schemaVersion !== CREDITS_PICKUP_REQUEST_V2)
+      return fail();
+    const common = { schemaVersion: CREDITS_PICKUP_REQUEST_V2, claimId: text(row.claimId, 128, CLAIM) };
+    if (operation === "pickup")
+      return { ...common, operation, pickupId: text(row.pickupId, 36, GUID), tokenSha256: text(row.tokenSha256, 64, HASH) };
+    if (operation === "ack")
+      return { ...common, operation, pickupId: text(row.pickupId, 36, GUID) };
+    return { ...common, operation };
+  });
+}
+function parseCreditsPickupResponseV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
+    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["operation", "binding", "pickupId"]);
+    const operation = choice(e.operation, operations), expectedBinding = binding(e.binding);
+    const expectedPickup = e.pickupId === null ? null : text(e.pickupId, 36, GUID);
+    if (expectedPickup === null && operation !== "status")
+      return fail();
+    const row = shape2(input, ["schemaVersion", "operation", "binding", "payment", "pickupState", "pickupId", "usable"]);
+    const bound = binding(row.binding), payment = choice(row.payment, ["pending", "paid", "expired"]);
+    const pickupState = choice(row.pickupState, ["unregistered", "registered", "acknowledged", "revoked"]);
+    const pickupId = row.pickupId === null ? null : text(row.pickupId, 36, GUID);
+    const usable = row.usable === null || typeof row.usable === "boolean" ? row.usable : fail();
+    if (row.schemaVersion !== CREDITS_PICKUP_RESPONSE_V2 || row.operation !== operation || !sameBinding(bound, expectedBinding) || pickupId !== null && pickupId !== expectedPickup || pickupState === "unregistered" !== (pickupId === null) || pickupState !== "unregistered" && payment !== "paid" || operation === "status" !== (usable === null) || operation !== "status" && (pickupState === "unregistered" || pickupState === "revoked") || operation === "ack" && pickupState !== "acknowledged" || operation !== "status" && pickupState === "acknowledged" && usable !== true)
+      return fail();
+    return { schemaVersion: CREDITS_PICKUP_RESPONSE_V2, operation, binding: bound, payment, pickupState, pickupId, usable };
+  });
+}
+function parseCreditsBalanceV2(value, expectedProductId) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
+    const expected = text(expectedProductId, 32, PRODUCT);
+    const row = shape2(input, ["schemaVersion", "product", "balance", "held", "lowBalance", "packs", "suggestedPackId"]);
+    const product = shape2(row.product, ["id", "name"]), money = shape2(row.balance, ["microUsd", "credits", "usd"]), held = shape2(row.held, ["microUsd"]);
+    const microUsd = integer(money.microUsd), credits = integer(money.credits), usd = text(money.usd, 32);
+    const amount = BigInt(microUsd), magnitude = amount < 0n ? -amount : amount;
+    const projectedUsd = `${amount < 0n ? "-" : ""}${magnitude / 1000000n}.${String(magnitude % 1000000n / 10000n).padStart(2, "0")}`;
+    if (row.schemaVersion !== CREDITS_BALANCE_V2 || product.id !== expected || credits !== Number(amount / 10000n) || usd !== projectedUsd || typeof row.lowBalance !== "boolean" || !Array.isArray(row.packs) || row.packs.length < 1 || row.packs.length > 8)
+      return fail();
+    const packs = row.packs.map((value2) => {
+      const pack = shape2(value2, ["id", "label", "usd", "credits", "bonusCredits"]);
+      const dollars = integer(pack.usd, 1, 1000), packCredits = integer(pack.credits, 0), bonusCredits = integer(pack.bonusCredits, 0);
+      if (packCredits !== dollars * 100)
+        return fail();
+      return { id: text(pack.id, 32, PRODUCT), label: displayText(pack.label, 128), usd: dollars, credits: packCredits, bonusCredits };
+    });
+    const suggestedPackId = text(row.suggestedPackId, 32, PRODUCT);
+    if (new Set(packs.map((pack) => pack.id)).size !== packs.length || !packs.some((pack) => pack.id === suggestedPackId))
+      return fail();
+    return {
+      schemaVersion: CREDITS_BALANCE_V2,
+      product: { id: expected, name: displayText(product.name, 64) },
+      balance: { microUsd, credits, usd },
+      held: { microUsd: integer(held.microUsd, 0) },
+      lowBalance: row.lowBalance,
+      packs,
+      suggestedPackId
+    };
+  });
+}
+function parseCreditsErrorV2(value, httpStatus) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
+    const row = shape2(input, ["error"]), error = choice(row.error, Object.keys(ERROR_STATUS));
+    if (ERROR_STATUS[error] !== httpStatus)
+      return fail();
+    return { error };
+  });
+}
+
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.1.1";
+var CREDITS_FOUNDATION_VERSION = "0.2.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -138,8 +439,8 @@ function formatUsd(microUsd) {
   return `${cents < 0 ? "-" : ""}${dollars}.${String(fraction).padStart(2, "0")}`;
 }
 function microUsdFromUsd(usd) {
-  const text = typeof usd === "number" ? Number.isFinite(usd) && Math.abs(usd) < 10000000000 ? usd.toFixed(6) : "" : usd;
-  const match = /^(-)?(\d{1,10})(?:\.(\d{1,6}))?$/u.exec(text);
+  const text2 = typeof usd === "number" ? Number.isFinite(usd) && Math.abs(usd) < 10000000000 ? usd.toFixed(6) : "" : usd;
+  const match = /^(-)?(\d{1,10})(?:\.(\d{1,6}))?$/u.exec(text2);
   if (match === null)
     throw new TypeError("usd must be a decimal dollar amount with at most six decimals.");
   const whole = BigInt(match[2]) * MILLION;
@@ -332,7 +633,7 @@ function parseCreditsRateCard(value) {
   const names = Object.keys(value.operations);
   if (names.length > MAX_OPERATIONS)
     return null;
-  const operations = {};
+  const operations2 = {};
   for (const name of names) {
     const operation = value.operations[name];
     if (!isCreditsOperation(name) || !shape(operation, ["label"], ["unitPrice"]) || !plainText(operation.label, 80))
@@ -340,7 +641,7 @@ function parseCreditsRateCard(value) {
     const unitPrice = operation.unitPrice === undefined ? undefined : parsePrice(operation.unitPrice);
     if (unitPrice === null || unitPrice !== undefined && unitPrice.microUsd < 0)
       return null;
-    operations[name] = Object.freeze({ label: operation.label, ...unitPrice === undefined ? {} : { unitPrice } });
+    operations2[name] = Object.freeze({ label: operation.label, ...unitPrice === undefined ? {} : { unitPrice } });
   }
   return Object.freeze({
     product,
@@ -348,7 +649,7 @@ function parseCreditsRateCard(value) {
     suggestedPackId: value.suggestedPackId,
     minUsd: value.minUsd,
     maxUsd: value.maxUsd,
-    operations: Object.freeze(operations)
+    operations: Object.freeze(operations2)
   });
 }
 function parseCreditsRequiredEnvelope(value) {
@@ -461,16 +762,16 @@ function summarizePacks(packs, suggestedPackId) {
   return packs.map((pack) => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " suggested" : ""}`).join(", ");
 }
 function renderCreditsRequiredForHuman(envelope) {
-  const parsed = parseCreditsRequiredEnvelope(envelope);
-  if (parsed === null)
+  const parsed2 = parseCreditsRequiredEnvelope(envelope);
+  if (parsed2 === null)
     throw new TypeError("Invalid credits required envelope.");
-  const emailCommand = parsed.commands.email.map((part) => part === "{address}" ? "<address>" : formatArgv([part])).join(" ");
-  const resume = formatArgv(parsed.resume.argv);
-  const wait = formatArgv(parsed.commands.wait.filter((part) => part !== "--json"));
+  const emailCommand = parsed2.commands.email.map((part) => part === "{address}" ? "<address>" : formatArgv([part])).join(" ");
+  const resume = formatArgv(parsed2.resume.argv);
+  const wait = formatArgv(parsed2.commands.wait.filter((part) => part !== "--json"));
   return [
-    `${parsed.product.name} needs $${parsed.required.usd} in credits for ${parsed.operation}; this device has $${parsed.balance.usd}.`,
-    `Add credits: ${parsed.topup.url} (valid until ${parsed.topup.expiresAt}; packs ${summarizePacks(parsed.topup.packs, parsed.topup.suggestedPackId)}).`,
-    parsed.resume.automatic ? `After payment, rerun ${resume} or run ${wait}; the work resumes.` : `After payment, run ${wait}, then rerun ${resume}.`,
+    `${parsed2.product.name} needs $${parsed2.required.usd} in credits for ${parsed2.operation}; this device has $${parsed2.balance.usd}.`,
+    `Add credits: ${parsed2.topup.url} (valid until ${parsed2.topup.expiresAt}; packs ${summarizePacks(parsed2.topup.packs, parsed2.topup.suggestedPackId)}).`,
+    parsed2.resume.automatic ? `After payment, rerun ${resume} or run ${wait}; the work resumes.` : `After payment, run ${wait}, then rerun ${resume}.`,
     `Not at this terminal? Email the link: ${emailCommand}`
   ].join(`
 `) + `
@@ -482,14 +783,14 @@ function claimUrl(serviceOrigin, claimId) {
   return `${serviceOrigin}/t/${claimId}`;
 }
 function creditsProtocol(profile) {
-  const parsed = parseCreditsProfile(profile);
-  if (parsed === null)
+  const parsed2 = parseCreditsProfile(profile);
+  if (parsed2 === null)
     throw new TypeError("Invalid credits product profile.");
-  const argv = (...parts) => Object.freeze([...parsed.command, "credits", ...parts]);
+  const argv = (...parts) => Object.freeze([...parsed2.command, "credits", ...parts]);
   return Object.freeze({
     schemaVersion: CREDITS_PROTOCOL_SCHEMA,
-    product: Object.freeze({ id: parsed.id, name: parsed.name }),
-    serviceOrigin: parsed.serviceOrigin ?? CREDITS_SERVICE_ORIGIN,
+    product: Object.freeze({ id: parsed2.id, name: parsed2.name }),
+    serviceOrigin: parsed2.serviceOrigin ?? CREDITS_SERVICE_ORIGIN,
     units: Object.freeze({
       ledger: "microUsd",
       microUsdPerCredit: MICRO_USD_PER_CREDIT,
@@ -557,12 +858,18 @@ export {
   parseCreditsRequiredEnvelope,
   parseCreditsRateCard,
   parseCreditsProfile,
+  parseCreditsPickupResponseV2,
+  parseCreditsPickupRequestV2,
   parseCreditsPack,
   parseCreditsMoney,
   parseCreditsEstimate,
+  parseCreditsErrorV2,
   parseCreditsErrorEnvelope,
   parseCreditsClaimStatus,
+  parseCreditsClaimCreatedV2,
+  parseCreditsClaimCreateV2,
   parseCreditsClaim,
+  parseCreditsBalanceV2,
   moneyFromMicroUsd,
   microUsdFromUsd,
   isMicroUsd,
@@ -590,14 +897,21 @@ export {
   MICRO_USD_PER_CREDIT,
   MAX_UNITS,
   MAX_MICRO_USD,
+  CREDITS_V2_MAX_RESPONSE_BYTES,
+  CREDITS_V2_MAX_REQUEST_BYTES,
   CREDITS_STATUS_SCHEMA,
   CREDITS_STATE_SCHEMA,
   CREDITS_SERVICE_ORIGIN,
   CREDITS_REQUIRED_SCHEMA,
   CREDITS_REQUIRED_INSTRUCTIONS,
   CREDITS_PROTOCOL_SCHEMA,
+  CREDITS_PICKUP_RESPONSE_V2,
+  CREDITS_PICKUP_REQUEST_V2,
   CREDITS_FOUNDATION_VERSION,
   CREDITS_ESTIMATE_SCHEMA,
   CREDITS_CLAIM_STATUS_SCHEMA,
-  CREDITS_CLAIM_SCHEMA
+  CREDITS_CLAIM_SCHEMA,
+  CREDITS_CLAIM_CREATE_V2,
+  CREDITS_CLAIM_CREATED_V2,
+  CREDITS_BALANCE_V2
 };

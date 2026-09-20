@@ -24,7 +24,10 @@ try {
   }
   for (const required of ["package/dist/index.js", "package/dist/node.js", "package/dist/server.js", "package/dist/index.d.ts",
     "package/dist/node.d.ts", "package/dist/server.d.ts", "package/dist/pickup-v2.d.ts", "package/src/pickup-v2.ts",
-    "package/README.md", "package/LICENSE", "package/docs/agents.md", "package/docs/pickup-v2.md"]) {
+    "package/dist/recovery.js", "package/dist/recovery.d.ts", "package/dist/recovery-bun.js", "package/dist/recovery-bun.d.ts",
+    "package/dist/recovery-unavailable.js", "package/dist/recovery-state.d.ts", "package/dist/recovery-sqlite.d.ts",
+    "package/README.md", "package/LICENSE", "package/docs/agents.md", "package/docs/pickup-v2.md",
+    "package/docs/recovery-state.md", "package/docs/recovery-sqlite.md"]) {
     if (!members.includes(required)) throw new Error(`Missing packed file ${required}.`);
   }
   const installed = join(scratch, "node_modules", "@hraness", "credits-foundation");
@@ -41,6 +44,8 @@ import { buildCreditsRequiredEnvelope, creditsProtocol, priceCostPlus, priceUnit
 import { parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2, parseCreditsPickupRequestV2, parseCreditsPickupResponseV2, parseCreditsBalanceV2, parseCreditsErrorV2, type CreditsCreationExpectationV2, type CreditsPickupExpectationV2, type CreditsBalanceV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
 import { ceilingFor, createCreditsClient, type CreditsClientResult, type CreditsHold, type CreditsSettlement, type CreditsRelease, type CreditsTerminalHoldState } from '@hraness/credits-foundation/server';
+import { prepareRecoveryState, readRecoveryToken, type RecoveryState } from '@hraness/credits-foundation/recovery';
+import { bootstrapRecoveryStore, checkRecoveryFence, commitRecoveryEvent, readRecoveryStore, type RecoveryLocation, type RecoveryStoreResult } from '@hraness/credits-foundation/recovery/bun';
 declare global { namespace NodeJS { interface ProcessEnv { readonly NODE_ENV: 'development' | 'production' | 'test'; } } }
 const profile: CreditsProductProfile = { id: 'peopleblade', name: 'PeopleBlade', command: ['peopleblade'] };
 const envelope: CreditsRequiredEnvelope = buildCreditsRequiredEnvelope(${requiredInput});
@@ -66,6 +71,13 @@ void hold;
 const terminalState: CreditsTerminalHoldState = 'expired';
 const needsReconciliation = (result: CreditsSettlement | CreditsRelease) => result.state === terminalState || result.state === 'released';
 void needsReconciliation;
+const recoveryLocation: RecoveryLocation = { trustedBase: '/private/temporary-fixture', directory: ['credits'], productId: 'peopleblade', serviceOrigin: 'https://credits.hraness.com' };
+const recovery: RecoveryStoreResult<RecoveryState> = readRecoveryStore(recoveryLocation);
+if (recovery.ok) readRecoveryToken(recovery.value);
+prepareRecoveryState({});
+bootstrapRecoveryStore(recoveryLocation, null);
+checkRecoveryFence(recoveryLocation, {});
+commitRecoveryEvent(recoveryLocation, {}, {});
 ceilingFor(${rateCard}, 'enrich_contact', 2);
 `);
   await writeFile(join(scratch, "tsconfig.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true, skipLibCheck: false, noEmit: true, types: ["node"] }, include: ["consumer.ts"] }));
@@ -77,6 +89,12 @@ import assert from 'node:assert/strict';
 import { buildCreditsRequiredEnvelope, formatUsd, priceUnit, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2 } from '@hraness/credits-foundation';
 import { emitCreditsRequired, readStoredDeviceToken, runCreditsCommand } from '@hraness/credits-foundation/node';
 import { ceilingFor, createCreditsClient } from '@hraness/credits-foundation/server';
+import { parseRecoveryState } from '@hraness/credits-foundation/recovery';
+import * as recoveryStore from '@hraness/credits-foundation/recovery/bun';
+assert.equal(parseRecoveryState({}), null);
+assert.deepEqual(Object.keys(recoveryStore).sort(), ['bootstrapRecoveryStore', 'checkRecoveryFence', 'commitRecoveryEvent', 'readRecoveryStore']);
+for (const operation of Object.values(recoveryStore)) assert.deepEqual(operation(null, null, null), { ok: false, reason: 'unsupported-runtime' });
+assert.ok(import.meta.resolve('@hraness/credits-foundation/recovery/bun').endsWith('/dist/recovery-unavailable.js'));
 const profile = { id: 'peopleblade', name: 'PeopleBlade', command: ['peopleblade'] };
 const io = { env: { XDG_STATE_HOME: ${JSON.stringify(stateHome)} }, fetch: async () => { throw new Error('no network in the smoke test'); } };
 assert.equal(formatUsd(12500000), '12.50');
@@ -108,6 +126,44 @@ assert.equal(hold.error.topup.url, 'https://credits.hraness.com/t/clm_1');
 assert.equal(ceilingFor(${rateCard}, 'enrich_contact', 2), 400000);
 `);
   run("node", [entry], scratch);
+  const bunEntry = join(scratch, "bun-recovery.mjs");
+  await writeFile(bunEntry, `
+import assert from 'node:assert/strict';
+import { constants as fsFlags, mkdirSync, realpathSync, statfsSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import * as recoveryStore from '@hraness/credits-foundation/recovery/bun';
+assert.ok(import.meta.resolve('@hraness/credits-foundation/recovery/bun').endsWith('/dist/recovery-bun.js'));
+const base = ${JSON.stringify(join(scratch, "bun-state"))};
+mkdirSync(base, { mode: 0o700 });
+const location = { trustedBase: realpathSync(base), directory: ['credits'], productId: 'peopleblade', serviceOrigin: 'https://credits.example' };
+const fresh = { databaseId: '00000000-0000-4000-8000-000000000001', deviceId: '00000000-0000-4000-8000-000000000002' };
+const hostMatches = process.platform === 'darwin' && process.arch === 'arm64' && Bun.version === '1.3.14'
+  && typeof process.getuid === 'function' && Number.isSafeInteger(process.getuid())
+  && typeof fsFlags.O_NOFOLLOW === 'number' && typeof fsFlags.O_NONBLOCK === 'number';
+let sqliteMatches = false;
+if (hostMatches) {
+  const probe = new Database(':memory:');
+  try {
+    const identity = probe.query('SELECT sqlite_version() AS version, sqlite_source_id() AS sourceId').get();
+    const options = probe.query('PRAGMA compile_options').all().map(row => row.compile_options);
+    sqliteMatches = identity.version === '3.51.0'
+      && identity.sourceId === '2025-06-12 13:14:41 f0ca7bba1c5e232e5d279fad6338121ab55af0c8c68c84cdfb18ba5114dcaapl'
+      && ['THREADSAFE=2', 'ENABLE_LOCKING_STYLE=1', 'DEFAULT_SYNCHRONOUS=2'].every(option => options.includes(option));
+  } finally { probe.close(); }
+}
+const result = recoveryStore.bootstrapRecoveryStore(location, fresh);
+if (hostMatches && sqliteMatches && statfsSync(base).type === 26) {
+  assert.equal(result.ok, true);
+  assert.deepEqual(recoveryStore.readRecoveryStore(location), result);
+  assert.deepEqual(recoveryStore.bootstrapRecoveryStore(location, null), result);
+  const { databaseId, revision, generation } = result.value;
+  assert.deepEqual(recoveryStore.checkRecoveryFence(location, { databaseId, revision, generation }), result);
+  assert.deepEqual(recoveryStore.commitRecoveryEvent(location, { databaseId, revision: revision + 1, generation }, { type: 'signout' }), { ok: false, reason: 'stale-state' });
+} else {
+  assert.deepEqual(result, { ok: false, reason: hostMatches && sqliteMatches ? 'unsupported-filesystem' : 'unsupported-runtime' });
+}
+`);
+  run(process.execPath, [bunEntry], scratch);
   const brokenPipe = join(scratch, "broken-pipe.mjs");
   await writeFile(brokenPipe, `
 import { buildCreditsRequiredEnvelope } from '@hraness/credits-foundation';
@@ -131,12 +187,18 @@ process.stdout.write(JSON.stringify({ emitted, exitCode: result.exitCode, stdout
   assert.deepEqual(JSON.parse(stdout), { emitted: false, exitCode: 0, stdout: "" });
   const browser = await Bun.build({ entrypoints: [join(installed, "dist/index.js")], target: "browser" });
   if (!browser.success) throw new Error("Root must remain browser portable.");
+  const browserRecovery = join(scratch, "browser-recovery.mjs");
+  await writeFile(browserRecovery, `export { parseRecoveryState } from '@hraness/credits-foundation/recovery'; export { readRecoveryStore } from '@hraness/credits-foundation/recovery/bun';`);
+  const recoveryBrowser = await Bun.build({ entrypoints: [browserRecovery], target: "browser" });
+  if (!recoveryBrowser.success) throw new Error("Portable recovery model and unsupported store must bundle without SQLite.");
+  for (const output of recoveryBrowser.outputs) assert.ok(!/bun:sqlite|node:fs|node:crypto/u.test(await output.text()), "Browser recovery bundle must not contain native storage");
   const manifest = JSON.parse(await readFile(join(installed, "package.json"), "utf8"));
   if (Object.keys(manifest.dependencies ?? {}).length !== 0) throw new Error("Unexpected runtime dependency.");
   assert.equal(manifest.exports["."].types, "./dist/index.d.ts");
   assert.equal(manifest.exports["./node"].types, "./dist/node.d.ts");
   assert.equal(manifest.exports["./server"].types, "./dist/server.d.ts");
-  process.stdout.write("Packed strict TypeScript/Node consumers, broken-pipe host, and browser-safe root passed.\n");
+  assert.deepEqual(manifest.exports["./recovery/bun"], { types: "./dist/recovery-bun.d.ts", bun: "./dist/recovery-bun.js", default: "./dist/recovery-unavailable.js" });
+  process.stdout.write("Packed strict TypeScript/Node consumers, qualified Bun recovery, unsupported runtime boundary, broken-pipe host, and browser-safe entries passed.\n");
 } finally {
   await rm(scratch, { recursive: true, force: true });
 }

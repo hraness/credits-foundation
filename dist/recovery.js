@@ -849,895 +849,456 @@ function creditsProtocol(profile) {
   });
 }
 
-// src/node.ts
-import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
-import { homedir, hostname } from "node:os";
-import { isAbsolute, join } from "node:path";
+// src/recovery-state.ts
+var RECOVERY_STATE_SCHEMA = "hraness-credits-recovery-state-v2";
+var RECOVERY_MAX_BYTES = 32768;
+var PRODUCT2 = /^[a-z0-9_-]{1,32}$/u;
+var UUID3 = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
+var CLAIM2 = /^[A-Za-z0-9_-]{1,128}$/u;
+var ACTIONS = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1"];
+var encoder2 = new TextEncoder;
 
-// src/transport.ts
-var MAX_REQUEST_BYTES = 16384;
-var MAX_RESPONSE_BYTES = 65536;
-var DEFAULT_TIMEOUT_MS = 1e4;
-async function readBody(response, max) {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && (!/^\d{1,9}$/u.test(declared.trim()) || Number(declared) > max)) {
-    throw new Error("Response exceeds the size limit.");
+class Invalid extends Error {
+  reason;
+  constructor(reason = "invalid-event") {
+    super("Invalid recovery value.");
+    this.reason = reason;
   }
-  const body = response.body;
-  if (body === null || body === undefined) {
-    const text2 = await response.text();
-    if (text2.length > max)
-      throw new Error("Response exceeds the size limit.");
-    return text2;
+}
+function fail2(reason) {
+  throw new Invalid(reason);
+}
+function require2(value, reason) {
+  if (!value)
+    fail2(reason);
+}
+function unicode2(s) {
+  for (let i = 0;i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 55296 && c <= 56319) {
+      const n = s.charCodeAt(++i);
+      if (!(n >= 56320 && n <= 57343))
+        return false;
+    } else if (c >= 56320 && c <= 57343)
+      return false;
   }
-  const reader = body.getReader();
-  const chunks = [];
-  let length = 0;
-  try {
-    for (;; ) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      if (value === undefined)
+  return true;
+}
+function uniqueKeys(json) {
+  const stack = [];
+  for (let i = 0;i < json.length; i++) {
+    const c = json[i];
+    if (c === '"') {
+      const start = i++;
+      for (;i < json.length; i++) {
+        if (json[i] === "\\")
+          i++;
+        else if (json[i] === '"')
+          break;
+      }
+      const top = stack.at(-1);
+      if (top?.key) {
+        const key = JSON.parse(json.slice(start, i + 1));
+        require2(!top.keys.has(key));
+        top.keys.add(key);
+        top.key = false;
+      }
+    } else if (c === "{")
+      stack.push({ keys: new Set, key: true });
+    else if (c === "[")
+      stack.push(null);
+    else if (c === "}" || c === "]")
+      stack.pop();
+    else if (c === ",") {
+      const top = stack.at(-1);
+      if (top)
+        top.key = true;
+    }
+    require2(stack.length <= 12);
+  }
+}
+function snapshot2(input) {
+  if (typeof input === "string") {
+    require2(input.length <= RECOVERY_MAX_BYTES && unicode2(input) && encoder2.encode(input).length <= RECOVERY_MAX_BYTES);
+    uniqueKeys(input);
+    input = JSON.parse(input);
+  }
+  const ancestors = new Set;
+  let nodes = 0, characters = 0;
+  function copy(v, depth) {
+    require2(++nodes <= 2048 && depth <= 12);
+    if (v === null || typeof v === "boolean")
+      return v;
+    if (typeof v === "number") {
+      require2(Number.isFinite(v) && !Object.is(v, -0));
+      return v;
+    }
+    if (typeof v === "string") {
+      characters += v.length;
+      require2(characters <= RECOVERY_MAX_BYTES && unicode2(v));
+      return v;
+    }
+    require2(typeof v === "object" && v !== null && !ancestors.has(v));
+    const array = Array.isArray(v), proto = Object.getPrototypeOf(v);
+    require2(array ? proto === Array.prototype : proto === null || proto === Object.prototype);
+    const keys = Reflect.ownKeys(v);
+    require2(keys.length <= 128);
+    const length = array ? Object.getOwnPropertyDescriptor(v, "length") : undefined;
+    if (array)
+      require2(length && "value" in length && Number.isSafeInteger(length.value) && length.value >= 0 && length.value <= 127);
+    const out2 = array ? [] : Object.create(null);
+    ancestors.add(v);
+    for (const key of keys) {
+      if (array && key === "length")
         continue;
-      length += value.byteLength;
-      if (length > max)
-        throw new Error("Response exceeds the size limit.");
-      chunks.push(value);
+      require2(typeof key === "string" && !["__proto__", "constructor", "prototype"].includes(key));
+      characters += key.length;
+      require2(characters <= RECOVERY_MAX_BYTES && unicode2(key));
+      const d = Object.getOwnPropertyDescriptor(v, key);
+      require2(d && "value" in d && d.enumerable);
+      if (array)
+        require2(key === String(out2.length));
+      out2[key] = copy(d.value, depth + 1);
     }
-  } catch (error) {
-    await reader.cancel(error).catch(() => {});
-    throw error;
+    if (array)
+      require2(out2.length === length.value);
+    ancestors.delete(v);
+    return out2;
   }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const out = copy(input, 0);
+  require2(encoder2.encode(JSON.stringify(out)).length <= RECOVERY_MAX_BYTES);
+  return out;
 }
-async function requestJson(request) {
-  const headers = { accept: "application/json", "user-agent": request.userAgent };
-  if (request.bearer !== undefined)
-    headers.authorization = `Bearer ${request.bearer}`;
-  let body;
-  if (request.body !== undefined) {
-    headers["content-type"] = "application/json; charset=utf-8";
-    body = JSON.stringify(request.body);
-    if (new TextEncoder().encode(body).byteLength > MAX_REQUEST_BYTES)
-      throw new TypeError("Request body exceeds 16 KiB.");
+function frozen(v) {
+  if (v !== null && typeof v === "object") {
+    for (const child of Object.values(v))
+      frozen(child);
+    Object.freeze(v);
   }
-  let response;
-  try {
-    response = await request.fetch(request.url, {
-      method: request.method,
-      headers,
-      ...body === undefined ? {} : { body },
-      signal: AbortSignal.timeout(request.timeoutMs),
-      redirect: "error"
-    });
-  } catch (error) {
-    return { kind: "unreachable", message: describe(error, request.timeoutMs) };
+  return v;
+}
+function object(v, required, optional = []) {
+  require2(v !== null && typeof v === "object" && !Array.isArray(v));
+  const row = v, keys = Object.keys(row);
+  require2(required.every((k) => keys.includes(k)) && keys.every((k) => required.includes(k) || optional.includes(k)));
+  return row;
+}
+function text2(v, max, pattern) {
+  require2(typeof v === "string" && v.length > 0 && v.length <= max && (!pattern || pattern.test(v)));
+  return v;
+}
+function counter(v) {
+  require2(typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+  return v;
+}
+function choice2(v, choices) {
+  require2(typeof v === "string" && choices.includes(v));
+  return v;
+}
+function canonical(v) {
+  if (v === null || typeof v !== "object")
+    return JSON.stringify(v);
+  if (Array.isArray(v))
+    return `[${v.map(canonical).join(",")}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+}
+function bound(v, product, device) {
+  const r = object(v, ["claimId", "productId", "deviceId"]);
+  require2(r.productId === product && r.deviceId === device);
+  return { claimId: text2(r.claimId, 128, CLAIM2), productId: product, deviceId: device };
+}
+function creation(body, s) {
+  const parsed2 = parseCreditsClaimCreateV2(body);
+  require2(parsed2 && parsed2.product === s.productId && parsed2.device.id === s.deviceId);
+  return parsed2;
+}
+function topupBody(body, s, operationId) {
+  const r = object(body, ["product", "device", "subjectToken"], ["email", "packId"]);
+  require2(s.active && r.subjectToken === s.active.token);
+  const { subjectToken: _token, ...fields } = r;
+  creation({ ...fields, schemaVersion: CREDITS_CLAIM_CREATE_V2, creationId: operationId }, s);
+  const out = canonical(r);
+  require2(encoder2.encode(out).length <= 4096);
+  return out;
+}
+function readState(v) {
+  const r = object(v, ["schemaVersion", "databaseId", "productId", "serviceOrigin", "deviceId", "revision", "generation", "bootstrap", "active", "pending"]);
+  require2(r.schemaVersion === RECOVERY_STATE_SCHEMA && origin(r.serviceOrigin));
+  const state = {
+    schemaVersion: RECOVERY_STATE_SCHEMA,
+    databaseId: text2(r.databaseId, 36, UUID3),
+    productId: text2(r.productId, 32, PRODUCT2),
+    serviceOrigin: r.serviceOrigin,
+    deviceId: text2(r.deviceId, 36, UUID3),
+    revision: counter(r.revision),
+    generation: counter(r.generation),
+    bootstrap: choice2(r.bootstrap, ["prepared", "active"]),
+    active: null,
+    pending: null
+  };
+  if (r.active !== null) {
+    const a = object(r.active, ["token", "source", "binding"]);
+    require2(isCreditsDeviceToken(a.token));
+    const source = choice2(a.source, ["legacy", "pickup-v2"]);
+    require2(source === "legacy" === (a.binding === null));
+    if (source === "legacy")
+      require2(UUID.test(state.deviceId) && isCreditsProductId(state.productId));
+    state.active = { token: a.token, source, binding: a.binding === null ? null : bound(a.binding, state.productId, state.deviceId) };
   }
-  const status = response.status;
-  const type = (response.headers.get("content-type") ?? "").trim();
-  if (!/^application\/json(?:\s*;.*)?$/iu.test(type)) {
-    return { kind: "malformed", status, message: `Unexpected content type ${type === "" ? "(none)" : sanitizeText(type, 80)}.` };
-  }
-  let text2;
-  try {
-    text2 = await readBody(response, MAX_RESPONSE_BYTES);
-  } catch (error) {
-    return { kind: "malformed", status, message: sanitizeText(error, 200) };
-  }
-  try {
-    return { kind: "json", status, body: JSON.parse(text2) };
-  } catch {
-    return { kind: "malformed", status, message: "Response is not valid JSON." };
-  }
-}
-function describe(error, timeoutMs) {
-  const name = error instanceof Error ? error.name : "";
-  if (name === "TimeoutError")
-    return `No response within ${Math.round(timeoutMs / 1000)} s.`;
-  if (name === "AbortError")
-    return "Request aborted.";
-  const detail = sanitizeText(error, 200);
-  return detail === "" ? "Request failed." : detail;
-}
-
-// src/node.ts
-var STATE_MAX_BYTES = 16384;
-var POLL_MS = 5000;
-var DEFAULT_WAIT = "15m";
-var MAX_WAIT_MS = 24 * 60 * 60000;
-var RATE_CARD_TTL_MS = 5 * 60000;
-var OUTPUT_TIMEOUT_MS = 500;
-var LOCK_RETRIES = 5;
-var LOCK_RETRY_MS = 200;
-var pendingOutputs = new WeakMap;
-var USAGE = "Usage: credits <protocol --json | status [--json] | topup [--usd N | --pack id] [--email addr] [--json] | email --to <addr> [--claim id] | wait [--claim id] [--timeout 15m] [--json] | estimate <operation> [--units N] [--json] | signout>";
-function isFailure(value) {
-  return "code" in value;
-}
-function usage(message) {
-  return { code: "usage_error", exitCode: 2, message: `${message} ${USAGE}` };
-}
-function creditsStateDirectory(options = {}) {
-  if (options.stateDirectory !== undefined)
-    return options.stateDirectory;
-  const env = options.env ?? process.env;
-  const xdg = env.XDG_STATE_HOME;
-  return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "state"), "hraness", "credits");
-}
-function initialState(productId) {
-  return { schemaVersion: CREDITS_STATE_SCHEMA, product: productId, deviceId: randomUUID() };
-}
-function parseState(value, productId) {
-  if (!shape(value, ["schemaVersion", "product", "deviceId"], ["token", "pendingClaim", "rateCard"]) || value.schemaVersion !== CREDITS_STATE_SCHEMA || value.product !== productId || typeof value.deviceId !== "string" || !UUID.test(value.deviceId) || value.token !== undefined && !isCreditsDeviceToken(value.token)) {
-    throw new Error("Invalid credits state.");
-  }
-  const state = { schemaVersion: CREDITS_STATE_SCHEMA, product: productId, deviceId: value.deviceId };
-  if (value.token !== undefined)
-    state.token = value.token;
-  if (value.pendingClaim !== undefined) {
-    const claim = value.pendingClaim;
-    if (!shape(claim, ["id", "expiresAt"], ["secret"]) || !isCreditsClaimId(claim.id) || !isCreditsTimestamp(claim.expiresAt) || claim.secret !== undefined && !isCreditsClaimSecret(claim.secret)) {
-      throw new Error("Invalid pending claim in credits state.");
+  if (r.pending !== null) {
+    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim"]).kind;
+    if (kind === "registration-v2") {
+      require2(state.active === null && state.bootstrap === "active");
+      const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claimSecret", "pickupId", "candidateToken", "created"]);
+      const bodyText = text2(p.canonicalCreateBody, 4096), body = creation(bodyText, state);
+      require2(canonical(body) === bodyText && isCreditsClaimSecret(p.claimSecret) && isCreditsDeviceToken(p.candidateToken));
+      const stage = choice2(p.stage, ["create-pending", "payment-pending", "paid", "pickup-pending", "ack-pending", "expired", "revoked"]);
+      const created = p.created === null ? null : parseCreditsClaimCreatedV2(p.created, { creationId: body.creationId, productId: state.productId, deviceId: state.deviceId, serviceOrigin: state.serviceOrigin });
+      require2(stage === "create-pending" === (p.created === null) && (p.created === null || created !== null));
+      state.pending = { kind, operationId: text2(p.operationId, 36, UUID3), canonicalCreateBody: bodyText, stage, created, claimSecret: p.claimSecret, pickupId: text2(p.pickupId, 36, UUID3), candidateToken: p.candidateToken };
+    } else {
+      require2(kind === "topup-v1" && state.active !== null);
+      const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claim"]), operationId = text2(p.operationId, 36, UUID3);
+      const stage = choice2(p.stage, ["prepared", "create-dispatched", "claim-pending", "expired"]);
+      let body = null;
+      if (p.canonicalCreateBody !== null) {
+        body = text2(p.canonicalCreateBody, 4096);
+        require2(topupBody(snapshot2(body), state, operationId) === body);
+      }
+      require2(body !== null || ["claim-pending", "expired"].includes(stage));
+      let claim = null;
+      if (p.claim !== null) {
+        const c = object(p.claim, ["claimId", "expiresAt", "payUrl"]);
+        require2(isCreditsClaimId(c.claimId) && isCreditsTimestamp(c.expiresAt));
+        require2(c.payUrl === null || c.payUrl === `${state.serviceOrigin}/t/${encodeURIComponent(c.claimId)}`);
+        claim = { claimId: c.claimId, expiresAt: c.expiresAt, payUrl: c.payUrl };
+      }
+      require2(["prepared", "create-dispatched"].includes(stage) === (claim === null));
+      require2(state.bootstrap === "active" || body === null && stage === "claim-pending");
+      state.pending = { kind, operationId, canonicalCreateBody: body, stage, claim };
     }
-    state.pendingClaim = { id: claim.id, ...claim.secret === undefined ? {} : { secret: claim.secret }, expiresAt: claim.expiresAt };
   }
-  if (value.rateCard !== undefined) {
-    const cache = value.rateCard;
-    if (!shape(cache, ["fetchedAt", "body"]) || !safeInteger(cache.fetchedAt, 0, Number.MAX_SAFE_INTEGER)) {
-      throw new Error("Invalid rate card cache in credits state.");
-    }
-    const body = parseCreditsRateCard(cache.body);
-    if (body === null)
-      throw new Error("Invalid rate card cache in credits state.");
-    state.rateCard = { fetchedAt: cache.fetchedAt, body };
-  }
+  if (state.bootstrap === "prepared")
+    require2((state.active === null || state.active.source === "legacy") && state.revision === 0 && state.generation === 0);
+  else
+    require2(state.revision >= 1 && state.generation < state.revision);
   return state;
 }
-function serializeState(state) {
-  return `${JSON.stringify({
-    schemaVersion: state.schemaVersion,
-    product: state.product,
-    deviceId: state.deviceId,
-    ...state.token === undefined ? {} : { token: state.token },
-    ...state.pendingClaim === undefined ? {} : { pendingClaim: state.pendingClaim },
-    ...state.rateCard === undefined ? {} : { rateCard: state.rateCard }
-  })}
-`;
-}
-async function readLocalJson(path) {
-  let handle;
+function parseRecoveryState(input) {
   try {
-    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > STATE_MAX_BYTES)
-      throw new Error("Invalid credits state file.");
-    const buffer = Buffer.alloc(STATE_MAX_BYTES + 1);
-    let length = 0;
-    while (length < buffer.length) {
-      const read = await handle.read(buffer, length, buffer.length - length, null);
-      if (read.bytesRead === 0)
-        break;
-      length += read.bytesRead;
-    }
-    if (length > STATE_MAX_BYTES)
-      throw new Error("Oversized credits state file.");
-    return JSON.parse(buffer.subarray(0, length).toString("utf8"));
-  } catch (error) {
-    if (errorCode(error) === "ENOENT")
-      return;
-    throw error;
-  } finally {
-    await handle?.close();
-  }
-}
-async function writeLocalText(directory, name, text2) {
-  const temporary = join(directory, `${name}.${randomUUID()}.tmp`);
-  try {
-    const handle = await open(temporary, "wx", 384);
-    try {
-      await handle.writeFile(text2, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, join(directory, name));
-  } finally {
-    await unlink(temporary).catch(() => {});
-  }
-}
-async function writeState(directory, state) {
-  let text2 = serializeState(state);
-  if (Buffer.byteLength(text2) > STATE_MAX_BYTES) {
-    delete state.rateCard;
-    text2 = serializeState(state);
-    if (Buffer.byteLength(text2) > STATE_MAX_BYTES)
-      throw new Error("Credits state exceeds its size limit.");
-  }
-  await writeLocalText(directory, `${state.product}.json`, text2);
-}
-async function withState(profile, options, action) {
-  let lock;
-  let lockPath;
-  try {
-    const directory = creditsStateDirectory(options);
-    await mkdir(directory, { recursive: true, mode: 448 });
-    lockPath = join(directory, `${profile.id}.lock`);
-    try {
-      lock = await open(lockPath, "wx", 384);
-    } catch (error) {
-      return { ok: false, reason: errorCode(error) === "EEXIST" ? "busy" : "state-unavailable" };
-    }
-    const raw = await readLocalJson(join(directory, `${profile.id}.json`));
-    const state = raw === undefined ? initialState(profile.id) : parseState(raw, profile.id);
-    const result = await action(state);
-    if (result.changed) {
-      try {
-        await writeState(directory, state);
-      } catch {
-        return { ok: false, reason: "state-unavailable", partial: result.value };
-      }
-    }
-    return { ok: true, value: result.value };
+    return frozen(readState(snapshot2(input)));
   } catch {
-    return { ok: false, reason: "state-unavailable" };
-  } finally {
-    if (lock !== undefined) {
-      await lock.close().catch(() => {});
-      if (lockPath !== undefined)
-        await unlink(lockPath).catch(() => {});
-    }
-  }
-}
-async function withStateRetrying(context, action) {
-  let result = await withState(context.profile, context.io, action);
-  for (let attempt = 0;attempt < LOCK_RETRIES && !result.ok && result.reason === "busy"; attempt += 1) {
-    await context.sleep(LOCK_RETRY_MS);
-    result = await withState(context.profile, context.io, action);
-  }
-  return result;
-}
-function stateFailure(context, reason) {
-  const directory = creditsStateDirectory(context.io);
-  return reason === "busy" ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command holds the state lock; try again in a moment. If none is running, remove ${join(directory, `${context.profile.id}.lock`)}.` } : { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
-}
-async function readStoredDeviceToken(profile, options = {}) {
-  try {
-    const parsed2 = parseCreditsProfile(profile);
-    if (parsed2 === null)
-      throw new TypeError("Invalid credits product profile.");
-    const raw = await readLocalJson(join(creditsStateDirectory(options), `${parsed2.id}.json`));
-    if (raw === undefined)
-      return { ok: true, value: null };
-    return { ok: true, value: parseState(raw, parsed2.id).token ?? null };
-  } catch {
-    return { ok: false, reason: "state-unavailable" };
-  }
-}
-function json(value) {
-  return `${JSON.stringify(value)}
-`;
-}
-async function writeOutput(sink, message) {
-  if (pendingOutputs.has(sink))
-    return false;
-  const operation = Symbol();
-  pendingOutputs.set(sink, operation);
-  return new Promise((resolve) => {
-    let settled = false;
-    let timer;
-    const stream = typeof sink.on === "function" && typeof sink.removeListener === "function";
-    const cleanup = () => {
-      try {
-        sink.removeListener?.("error", onError);
-      } catch {}
-      try {
-        sink.removeListener?.("close", onClose);
-      } catch {}
-      if (pendingOutputs.get(sink) === operation)
-        pendingOutputs.delete(sink);
-    };
-    const settle = (ok) => {
-      if (settled)
-        return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(ok);
-    };
-    const finished = (ok) => {
-      settle(ok);
-      if (stream)
-        setTimeout(cleanup, 0).unref();
-      else
-        cleanup();
-    };
-    const onError = () => finished(false);
-    const onClose = () => finished(false);
-    timer = setTimeout(() => {
-      settle(false);
-    }, OUTPUT_TIMEOUT_MS);
-    try {
-      if (stream) {
-        sink.on("error", onError);
-        sink.on("close", onClose);
-        sink.write(message, (error) => finished(!error));
-      } else {
-        const result = sink.write(message);
-        Promise.resolve(result).then((value) => finished(value !== false), () => finished(false));
-      }
-    } catch {
-      finished(false);
-    }
-  });
-}
-
-class Emitter {
-  io;
-  stdout = "";
-  stderr = "";
-  constructor(io) {
-    this.io = io;
-  }
-  async out(text2) {
-    this.stdout += text2;
-    if (this.io.stdout !== undefined)
-      await writeOutput(this.io.stdout, text2);
-  }
-  async err(text2) {
-    this.stderr += text2;
-    if (this.io.stderr !== undefined)
-      await writeOutput(this.io.stderr, text2);
-  }
-}
-async function emitCreditsRequired(envelope, io = {}, audience = "agent") {
-  try {
-    const parsed2 = parseCreditsRequiredEnvelope(envelope);
-    if (parsed2 === null)
-      return false;
-    const sink = io.stderr ?? process.stderr;
-    return await writeOutput(sink, audience === "human" ? renderCreditsRequiredForHuman(parsed2) : json(parsed2));
-  } catch {
-    return false;
-  }
-}
-function serviceClient(profile, io) {
-  const origin3 = profile.serviceOrigin ?? CREDITS_SERVICE_ORIGIN;
-  const fetch = io.fetch ?? globalThis.fetch;
-  const userAgent = `hraness-credits-foundation/${CREDITS_FOUNDATION_VERSION} (${profile.id})`;
-  const timeoutMs = io.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-  return {
-    origin: origin3,
-    get: (path, bearer) => requestJson({ fetch, method: "GET", url: `${origin3}${path}`, userAgent, timeoutMs, ...bearer === undefined ? {} : { bearer } }),
-    post: (path, body, bearer) => requestJson({ fetch, method: "POST", url: `${origin3}${path}`, userAgent, timeoutMs, body, ...bearer === undefined ? {} : { bearer } })
-  };
-}
-function serviceFailure(response, activity) {
-  if (response.kind === "unreachable") {
-    return { code: "service_unreachable", exitCode: 1, message: `The credits service could not be reached while ${activity}: ${response.message}` };
-  }
-  if (response.kind === "malformed") {
-    return { code: "service_error", exitCode: 1, service: { status: response.status }, message: `The credits service sent an unexpected response (HTTP ${response.status}) while ${activity}: ${response.message}` };
-  }
-  const envelope = parseCreditsErrorEnvelope(response.body);
-  const status = response.status;
-  const service = { status, ...envelope === null ? {} : { code: envelope.code } };
-  const detail = envelope?.message === undefined ? "" : ` ${envelope.message}`;
-  const code = envelope?.code ?? `http_${status}`;
-  if (status === 401 || status === 403) {
-    return { code: "unauthorized", exitCode: 2, service, message: `The credits service rejected the stored credentials while ${activity}.${detail} If this device was signed out elsewhere, run signout and then topup.` };
-  }
-  if (status === 404)
-    return { code: "not_found", exitCode: 2, service, message: `The credits service found no such claim or product while ${activity}.${detail}` };
-  if (status === 410)
-    return { code: "expired", exitCode: 2, service, message: `That topup link has expired. Run topup to create a new one.${detail}` };
-  if (status === 400 || status === 402 || status === 409 || status === 413) {
-    return { code: "invalid_request", exitCode: 2, service, message: `The credits service refused the request while ${activity} (${code}).${detail}` };
-  }
-  if (status === 429)
-    return { code: "rate_limited", exitCode: 1, service, message: `The credits service is rate limiting this device while ${activity}; try again later.${detail}` };
-  if (status === 503 && (code === "product_disabled" || code === "email_unavailable")) {
-    return { code, exitCode: 1, service, message: `The credits service reports ${code.replaceAll("_", " ")} while ${activity}.${detail}` };
-  }
-  return { code: "service_error", exitCode: 1, service, message: `The credits service failed (HTTP ${status}, ${code}) while ${activity}.${detail}` };
-}
-function malformed(activity, status) {
-  return { code: "service_error", exitCode: 1, service: { status }, message: `The credits service sent a response this version cannot read while ${activity}.` };
-}
-async function loadRateCard(context, state) {
-  const now = context.now();
-  const cached = state.rateCard;
-  if (cached !== undefined && now >= cached.fetchedAt && now - cached.fetchedAt < RATE_CARD_TTL_MS) {
-    return { card: cached.body, fetched: false };
-  }
-  const response = await context.client.get(`/v1/rate-cards/${context.profile.id}`);
-  if (response.kind !== "json" || response.status !== 200)
-    return serviceFailure(response, "reading the rate card");
-  const card = parseCreditsRateCard(response.body);
-  if (card === null)
-    return malformed("reading the rate card", response.status);
-  state.rateCard = { fetchedAt: now, body: card };
-  return { card, fetched: true };
-}
-function parseArgs(args, valueFlags, booleanFlags) {
-  const flags = new Map;
-  const positional = [];
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (!plainText(arg, 512))
-      return usage("Arguments must be plain text.");
-    if (!arg.startsWith("--")) {
-      positional.push(arg);
-      continue;
-    }
-    const separator = arg.indexOf("=");
-    const name = separator === -1 ? arg.slice(2) : arg.slice(2, separator);
-    if (flags.has(name))
-      return usage(`Option --${name} was given twice.`);
-    if (booleanFlags.includes(name)) {
-      if (separator !== -1)
-        return usage(`Option --${name} takes no value.`);
-      flags.set(name, true);
-      continue;
-    }
-    if (!valueFlags.includes(name))
-      return usage(`Unknown option --${name}.`);
-    const value = separator === -1 ? args[index += 1] : arg.slice(separator + 1);
-    if (value === undefined || !plainText(value, 512))
-      return usage(`Option --${name} needs a value.`);
-    flags.set(name, value);
-  }
-  return { positional, flags };
-}
-function flag(args, name) {
-  const value = args.flags.get(name);
-  return typeof value === "string" ? value : undefined;
-}
-function parseDuration(text2) {
-  const match = /^(\d{1,5})(s|m|h)$/u.exec(text2);
-  if (match === null)
     return null;
-  const amount = Number(match[1]);
-  const ms = amount * (match[2] === "s" ? 1000 : match[2] === "m" ? 60000 : 3600000);
-  return ms >= 1000 && ms <= MAX_WAIT_MS ? ms : null;
-}
-function parseUnits(text2) {
-  if (text2 === undefined)
-    return 1;
-  return /^[1-9]\d{0,8}$/u.test(text2) ? Number(text2) : null;
-}
-function argvText(context, ...parts) {
-  return formatArgv([...context.profile.command, "credits", ...parts]);
-}
-function renderStatus(status) {
-  const held = status.held.microUsd > 0 ? `, ${moneyFromMicroUsd(status.held.microUsd).usd} held for work in progress` : "";
-  return [
-    `${status.product.name} credits: $${status.balance.usd} (${status.balance.credits} credits)${held === "" ? "" : `, $${held.slice(2)}`}${status.lowBalance ? " — balance is low" : ""}.`,
-    ...status.account.email === undefined ? [] : [`Account: ${status.account.email}`],
-    ...status.lastPrice === undefined ? [] : [`Last operation cost $${status.lastPrice.usd}.`],
-    `Add credits: ${status.topup.url} (packs ${summarizePacks(status.topup.packs, status.topup.suggestedPackId)})`
-  ].join(`
-`) + `
-`;
-}
-function renderClaim(context, claim) {
-  const packs = claim.packs.map((pack) => `${formatDollars(pack.usd)} = ${pack.credits}${pack.bonusCredits > 0 ? ` + ${pack.bonusCredits} bonus` : ""} credits${pack.id === claim.suggestedPackId ? " (suggested)" : ""}`).join("; ");
-  return [
-    `Add ${claim.product.name} credits: ${claim.url}`,
-    `Packs: ${packs}.`,
-    `The link is valid until ${claim.expiresAt}. After paying, run ${argvText(context, "wait")} or rerun your command.`,
-    `Not at this terminal? ${argvText(context, "email", "--to")} <address>`,
-    ...claim.balance === undefined ? [] : [`Current balance: $${claim.balance.usd} (${claim.balance.credits} credits).`]
-  ].join(`
-`) + `
-`;
-}
-function renderEstimate(estimate) {
-  if (estimate.unitPrice === undefined || estimate.total === undefined) {
-    return `${estimate.product.name} ${estimate.label} is priced at settlement from actual usage; there is no fixed unit price to show.
-`;
   }
-  return `${estimate.product.name} ${estimate.label}: $${estimate.unitPrice.usd} per unit; ${estimate.units} ${estimate.units === 1 ? "unit" : "units"} = $${estimate.total.usd} (${estimate.total.credits} credits).
-`;
 }
-function signedOut(context) {
-  return Object.freeze({
-    schemaVersion: CREDITS_STATUS_SCHEMA,
-    product: Object.freeze({ id: context.profile.id, name: context.profile.name }),
-    signedOut: true,
-    topup: Object.freeze({ command: Object.freeze([...context.profile.command, "credits", "topup", "--json"]) })
-  });
-}
-function deviceLabel(io) {
-  if (io.deviceLabel === null)
-    return;
-  const label = io.deviceLabel ?? safeHostname();
-  return plainText(label, 64) ? label : undefined;
-}
-function safeHostname() {
+function prepareRecoveryState(input) {
   try {
-    return hostname();
-  } catch {
-    return "";
-  }
-}
-async function statusCommand(context, rest) {
-  const args = parseArgs(rest, [], ["json"]);
-  if ("code" in args)
-    return args;
-  if (args.positional.length > 0)
-    return usage("status takes no arguments.");
-  const state = await withState(context.profile, context.io, (s) => ({ value: s.token }));
-  if (!state.ok)
-    return stateFailure(context, state.reason);
-  if (state.value === undefined) {
-    return {
-      exitCode: 0,
-      json: signedOut(context),
-      human: `No ${context.profile.name} credits are set up on this device. Add credits: ${argvText(context, "topup")}
-`
-    };
-  }
-  const response = await context.client.get("/v1/balance", state.value);
-  if (response.kind !== "json" || response.status !== 200)
-    return serviceFailure(response, "reading the balance");
-  const status = parseCreditsStatus(response.body);
-  if (status === null)
-    return malformed("reading the balance", response.status);
-  return { exitCode: 0, json: status, human: renderStatus(status) };
-}
-async function topupCommand(context, rest) {
-  const args = parseArgs(rest, ["usd", "pack", "email"], ["json"]);
-  if ("code" in args)
-    return args;
-  if (args.positional.length > 0)
-    return usage("topup takes options only.");
-  const usd = flag(args, "usd");
-  const pack = flag(args, "pack");
-  const email2 = flag(args, "email");
-  if (usd !== undefined && pack !== undefined)
-    return usage("Choose either --usd or --pack.");
-  if (pack !== undefined && !isCreditsPackId(pack))
-    return usage("--pack must be a pack id such as p25.");
-  if (email2 !== undefined && !isCreditsEmail(email2))
-    return usage("--email must be a valid address.");
-  let usdMicro;
-  if (usd !== undefined) {
-    try {
-      usdMicro = microUsdFromUsd(usd);
-    } catch {
-      return usage("--usd must be a dollar amount such as 25.");
-    }
-  }
-  const label = deviceLabel(context.io);
-  const result = await withState(context.profile, context.io, async (state) => {
-    let changed = false;
-    let packId = pack;
-    if (usdMicro !== undefined) {
-      const loaded = await loadRateCard(context, state);
-      if ("code" in loaded)
-        return { value: loaded };
-      changed = loaded.fetched;
-      const match = loaded.card.packs.find((candidate) => microUsdFromUsd(candidate.usd) === usdMicro);
-      if (match === undefined) {
-        return { value: usage(`No ${context.profile.name} pack costs $${formatDollars(Number(usd)).slice(1)}. Packs: ${summarizePacks(loaded.card.packs, loaded.card.suggestedPackId)}.`), changed };
-      }
-      packId = match.id;
-    }
-    const response = await context.client.post("/v1/claims", {
-      product: context.profile.id,
-      device: { id: state.deviceId, ...label === undefined ? {} : { label } },
-      ...state.token === undefined ? {} : { subjectToken: state.token },
-      ...email2 === undefined ? {} : { email: email2 },
-      ...packId === undefined ? {} : { packId }
+    const r = object(snapshot2(input), ["databaseId", "productId", "serviceOrigin", "deviceId"], ["legacy", "legacyOperationId"]);
+    const state = readState({
+      schemaVersion: RECOVERY_STATE_SCHEMA,
+      databaseId: r.databaseId,
+      productId: r.productId,
+      serviceOrigin: r.serviceOrigin,
+      deviceId: r.deviceId,
+      revision: 0,
+      generation: 0,
+      bootstrap: "prepared",
+      active: null,
+      pending: null
     });
-    if (response.kind !== "json" || response.status !== 201)
-      return { value: serviceFailure(response, "creating a topup link"), changed };
-    const claim = parseCreditsClaim(response.body);
-    if (claim === null)
-      return { value: malformed("creating a topup link", response.status), changed };
-    state.pendingClaim = { id: claim.claimId, ...claim.claimSecret === undefined ? {} : { secret: claim.claimSecret }, expiresAt: claim.expiresAt };
-    const { claimSecret: _secret, ...visible } = claim;
-    return { value: { exitCode: 0, json: visible, human: renderClaim(context, claim) }, changed: true };
-  });
-  if (!result.ok) {
-    if ("partial" in result && !isFailure(result.partial)) {
-      return { code: "state_unavailable", exitCode: 1, message: `A ${context.profile.name} topup link was created but could not be saved under ${creditsStateDirectory(context.io)}. Repair that directory and run topup again; the unsaved link expires unpaid.` };
+    if (!("legacy" in r)) {
+      require2(!("legacyOperationId" in r));
+      return frozen(state);
     }
-    return stateFailure(context, result.reason);
-  }
-  return result.value;
-}
-async function emailCommand(context, rest) {
-  const args = parseArgs(rest, ["to", "claim"], ["json"]);
-  if ("code" in args)
-    return args;
-  if (args.positional.length > 0)
-    return usage("email takes options only.");
-  const to = flag(args, "to");
-  const claim = flag(args, "claim");
-  if (to === undefined || !isCreditsEmail(to))
-    return usage("email needs --to <address>.");
-  if (claim !== undefined && !isCreditsClaimId(claim))
-    return usage("--claim must be a claim id.");
-  const state = await withState(context.profile, context.io, (s) => ({ value: { token: s.token, pending: s.pendingClaim } }));
-  if (!state.ok)
-    return stateFailure(context, state.reason);
-  const credentials = claimCredentials(context, state.value, claim);
-  if (isFailure(credentials))
-    return credentials;
-  const response = await context.client.post(`/v1/claims/${credentials.claimId}/email`, { to }, credentials.bearer);
-  if (response.kind === "json" && response.status === 410)
-    await forgetPendingClaim(context, credentials.claimId);
-  if (response.kind !== "json" || response.status !== 202)
-    return serviceFailure(response, "emailing the link");
-  const body = response.body;
-  if (!shape(body, ["sentTo"]) || !isCreditsEmail(body.sentTo))
-    return malformed("emailing the link", response.status);
-  return {
-    exitCode: 0,
-    json: { sentTo: body.sentTo },
-    jsonAlways: true,
-    human: `Sent the ${context.profile.name} credits link to ${body.sentTo}.
-`
-  };
-}
-function claimCredentials(context, state, requested) {
-  const claimId = requested ?? state.pending?.id;
-  if (claimId === undefined) {
-    return { code: "no_pending_claim", exitCode: 2, message: `No pending ${context.profile.name} topup link on this device. Run ${argvText(context, "topup")} first, or pass --claim <id>.` };
-  }
-  const own = state.pending?.id === claimId ? state.pending : undefined;
-  const bearer = own?.secret ?? state.token;
-  if (bearer === undefined) {
-    return { code: "unauthorized", exitCode: 2, message: `This device holds no credentials for claim ${claimId}. Run ${argvText(context, "topup")} to create a link it can follow.` };
-  }
-  return { claimId, bearer, ...own === undefined ? {} : { expiresAt: own.expiresAt } };
-}
-async function forgetPendingClaim(context, claimId) {
-  await withStateRetrying(context, (state) => {
-    if (state.pendingClaim?.id !== claimId)
-      return { value: false };
-    delete state.pendingClaim;
-    return { value: true, changed: true };
-  });
-}
-async function waitCommand(context, rest) {
-  const args = parseArgs(rest, ["claim", "timeout"], ["json"]);
-  if ("code" in args)
-    return args;
-  if (args.positional.length > 0)
-    return usage("wait takes options only.");
-  const claim = flag(args, "claim");
-  if (claim !== undefined && !isCreditsClaimId(claim))
-    return usage("--claim must be a claim id.");
-  const timeoutText = flag(args, "timeout") ?? DEFAULT_WAIT;
-  const timeoutMs = parseDuration(timeoutText);
-  if (timeoutMs === null)
-    return usage("--timeout must be a duration between 1s and 24h, such as 90s or 15m.");
-  const state = await withState(context.profile, context.io, (s) => ({ value: { token: s.token, pending: s.pendingClaim } }));
-  if (!state.ok)
-    return stateFailure(context, state.reason);
-  const credentials = claimCredentials(context, state.value, claim);
-  if (isFailure(credentials))
-    return credentials;
-  const preflight = await withStateRetrying(context, () => ({ value: true, changed: true }));
-  if (!preflight.ok)
-    return stateFailure(context, preflight.reason);
-  const { claimId, bearer } = credentials;
-  if (!context.json) {
-    const validity = credentials.expiresAt === undefined ? "" : `; link valid until ${credentials.expiresAt}`;
-    await context.emitter.err(`Waiting for payment at ${claimUrl(context.client.origin, claimId)} (polling every 5 s for up to ${timeoutText}${validity}).
-`);
-  }
-  const deadline = context.now() + timeoutMs;
-  let last;
-  for (;; ) {
-    const response = await context.client.get(`/v1/claims/${claimId}`, bearer);
-    if (response.kind === "json") {
-      if (response.status === 200) {
-        const status = parseCreditsClaimStatus(response.body);
-        if (status === null)
-          return malformed("waiting for payment", response.status);
-        last = status;
-        if (status.state !== "pending")
-          return settleClaim(context, status, state.value.token !== undefined);
-      } else if (response.status === 410) {
-        await forgetPendingClaim(context, claimId);
-        return serviceFailure(response, "waiting for payment");
-      } else if (response.status < 500 && response.status !== 429) {
-        return serviceFailure(response, "waiting for payment");
-      }
+    const legacy = object(r.legacy, ["schemaVersion", "product", "deviceId"], ["token", "pendingClaim", "rateCard"]);
+    require2(legacy.schemaVersion === CREDITS_STATE_SCHEMA && legacy.product === state.productId && isCreditsProductId(legacy.product) && legacy.deviceId === state.deviceId && UUID.test(state.deviceId));
+    if ("rateCard" in legacy) {
+      const cache = object(legacy.rateCard, ["fetchedAt", "body"]);
+      counter(cache.fetchedAt);
+      require2(parseCreditsRateCard(cache.body));
     }
-    const remaining = deadline - context.now();
-    if (remaining <= 0)
-      break;
-    await context.sleep(Math.min(POLL_MS, remaining));
-  }
-  if (last === undefined) {
-    return { code: "service_unreachable", exitCode: 1, message: `The credits service gave no usable answer while waiting for payment of claim ${claimId} for ${timeoutText}.` };
-  }
-  return {
-    code: "timeout",
-    exitCode: 3,
-    fields: { claim: last },
-    message: `Not paid yet after ${timeoutText}. After payment, run ${argvText(context, "wait")} again or rerun your command.`
-  };
-}
-async function settleClaim(context, status, hadToken) {
-  const { token, ...visible } = status;
-  if (status.state === "expired") {
-    await forgetPendingClaim(context, status.claimId);
-    return { code: "expired", exitCode: 2, fields: { claim: visible }, message: `That topup link has expired. Run ${argvText(context, "topup")} to create a new one.` };
-  }
-  if (status.state === "consumed" && !hadToken && token === undefined) {
-    await forgetPendingClaim(context, status.claimId);
-    return { code: "consumed", exitCode: 2, fields: { claim: visible }, message: `Claim ${status.claimId} was paid, but its device token was already collected by another process on this device.` };
-  }
-  const stored = await withStateRetrying(context, (state) => {
-    if (token !== undefined)
-      state.token = token;
-    if (state.pendingClaim?.id === status.claimId)
-      delete state.pendingClaim;
-    return { value: true, changed: true };
-  });
-  if (!stored.ok) {
-    const rescue = token === undefined ? "" : ` The issued device token could not be stored; add it as "token" in that file to keep this purchase usable here: ${token}`;
-    return { code: stored.reason === "busy" ? "busy" : "state_unavailable", exitCode: 1, message: `Paid, but the ${context.profile.name} credits state under ${creditsStateDirectory(context.io)} could not be updated.${rescue}` };
-  }
-  const balance = status.balance === undefined ? "" : ` ${context.profile.name} balance: $${status.balance.usd} (${status.balance.credits} credits).`;
-  return {
-    exitCode: 0,
-    json: visible,
-    human: `Paid.${balance}${token === undefined ? "" : " This device is now signed in."}
-`
-  };
-}
-async function estimateCommand(context, rest) {
-  const args = parseArgs(rest, ["units"], ["json"]);
-  if ("code" in args)
-    return args;
-  const operation = args.positional[0];
-  if (args.positional.length !== 1 || !isCreditsOperation(operation))
-    return usage("estimate needs one operation name.");
-  const units = parseUnits(flag(args, "units"));
-  if (units === null)
-    return usage("--units must be a whole number from 1 to 999999999.");
-  const result = await withState(context.profile, context.io, async (state) => {
-    const loaded = await loadRateCard(context, state);
-    return "code" in loaded ? { value: loaded } : { value: loaded.card, changed: loaded.fetched };
-  });
-  if (!result.ok)
-    return stateFailure(context, result.reason);
-  if (isFailure(result.value))
-    return result.value;
-  const card = result.value;
-  const known = Object.keys(card.operations);
-  const entry = Object.prototype.hasOwnProperty.call(card.operations, operation) ? card.operations[operation] : undefined;
-  if (entry === undefined) {
-    return { code: "unknown_operation", exitCode: 2, message: `${context.profile.name} has no operation "${operation}". Known operations: ${known.length === 0 ? "none" : known.join(", ")}.` };
-  }
-  let estimate;
-  if (entry.unitPrice === undefined) {
-    estimate = Object.freeze({ schemaVersion: CREDITS_ESTIMATE_SCHEMA, product: card.product, operation, label: entry.label, units, known: false });
-  } else {
-    let total;
-    try {
-      total = priceUnit(entry.unitPrice.microUsd, units);
-    } catch {
-      return usage("That many units exceed the supported total.");
+    let active = null, pending = null;
+    if ("token" in legacy) {
+      require2(isCreditsDeviceToken(legacy.token));
+      active = { token: legacy.token, source: "legacy", binding: null };
     }
-    estimate = Object.freeze({
-      schemaVersion: CREDITS_ESTIMATE_SCHEMA,
-      product: card.product,
-      operation,
-      label: entry.label,
-      units,
-      known: true,
-      unitPrice: entry.unitPrice,
-      total: moneyFromMicroUsd(total)
-    });
-  }
-  return { exitCode: 0, json: estimate, human: renderEstimate(estimate) };
-}
-async function signoutCommand(context, rest) {
-  const args = parseArgs(rest, [], ["json"]);
-  if ("code" in args)
-    return args;
-  if (args.positional.length > 0)
-    return usage("signout takes no arguments.");
-  const result = await withState(context.profile, context.io, (state) => {
-    const had = state.token !== undefined;
-    delete state.token;
-    return { value: had, changed: had };
-  });
-  if (!result.ok)
-    return stateFailure(context, result.reason);
-  return {
-    exitCode: 0,
-    json: { signedOut: true },
-    jsonAlways: true,
-    human: result.value ? `Forgot the ${context.profile.name} credits token on this device.
-` : `No ${context.profile.name} credits token was stored on this device.
-`
-  };
-}
-async function dispatch(context, argv) {
-  const [command, ...rest] = argv;
-  switch (command) {
-    case "protocol":
-      if (rest.length !== 1 || rest[0] !== "--json")
-        return usage("protocol requires --json.");
-      return { exitCode: 0, json: creditsProtocol(context.profile), human: "" };
-    case "status":
-      return statusCommand(context, rest);
-    case "topup":
-      return topupCommand(context, rest);
-    case "email":
-      return emailCommand(context, rest);
-    case "wait":
-      return waitCommand(context, rest);
-    case "estimate":
-      return estimateCommand(context, rest);
-    case "signout":
-      return signoutCommand(context, rest);
-    default:
-      return usage(command === undefined ? "A credits command is required." : `Unknown credits command "${sanitizeText(command, 40)}".`);
-  }
-}
-async function runCreditsCommand(profile, argv = [], io = {}) {
-  const emitter = new Emitter(io);
-  const args = Array.from(argv);
-  const wantsJson = args.includes("--json");
-  let outcome;
-  try {
-    const parsed2 = parseCreditsProfile(profile);
-    if (parsed2 === null) {
-      outcome = { code: "usage_error", exitCode: 2, message: "Invalid credits product profile." };
-    } else {
-      const context = {
-        profile: parsed2,
-        io,
-        client: serviceClient(parsed2, io),
-        emitter,
-        json: wantsJson,
-        now: io.now ?? Date.now,
-        sleep: io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+    if ("pendingClaim" in legacy) {
+      const claim = object(legacy.pendingClaim, ["id", "expiresAt"]);
+      require2(active && isCreditsClaimId(claim.id) && isCreditsTimestamp(claim.expiresAt));
+      pending = {
+        kind: "topup-v1",
+        operationId: text2(r.legacyOperationId, 36, UUID3),
+        canonicalCreateBody: null,
+        stage: "claim-pending",
+        claim: { claimId: claim.id, expiresAt: claim.expiresAt, payUrl: null }
       };
-      outcome = await dispatch(context, args);
+    } else
+      require2(!("legacyOperationId" in r));
+    return frozen(readState({ ...state, active, pending }));
+  } catch {
+    return null;
+  }
+}
+function allowed(s, action, dispatchReply = false) {
+  if (s.bootstrap !== "active" || !s.pending)
+    return false;
+  const p = s.pending;
+  if (p.kind === "topup-v1")
+    return action === "status-topup-v1" ? p.stage === "claim-pending" : action === "create-topup-v1" && dispatchReply && p.stage === "create-dispatched";
+  return action === "create-v2" ? p.stage === "create-pending" : action === "status-v2" ? !["create-pending", "expired", "revoked"].includes(p.stage) : action === "pickup-v2" ? p.stage === "pickup-pending" : (action === "ack-v2" || action === "credential-v2") && p.stage === "ack-pending";
+}
+function ticket(s, action) {
+  require2(s.pending);
+  return { databaseId: s.databaseId, generation: s.generation, operationId: s.pending.operationId, preparedRevision: s.revision, action };
+}
+function recoveryAction(input, action) {
+  const s = parseRecoveryState(input);
+  return s && ACTIONS.includes(action) && allowed(s, action) ? frozen(ticket(s, action)) : null;
+}
+function readRecoveryToken(input) {
+  const s = parseRecoveryState(input);
+  return s?.bootstrap === "active" ? s.active?.token ?? null : null;
+}
+function checkTicket(s, value, action) {
+  const r = object(value, ["databaseId", "generation", "operationId", "preparedRevision", "action"]), a = choice2(r.action, ACTIONS);
+  require2((action === undefined || a === action) && allowed(s, a, true), "stale-ticket");
+  const expected = ticket(s, a);
+  require2(canonical(r) === canonical(expected), "stale-ticket");
+  return expected;
+}
+function commit(s, updates, action = null) {
+  require2(s.revision < Number.MAX_SAFE_INTEGER, "counter-exhausted");
+  const next = parseRecoveryState({ ...s, ...updates, revision: s.revision + 1 });
+  require2(next, "invalid-transition");
+  require2(action === null || allowed(next, action, true), "invalid-transition");
+  return frozen({ kind: "commit", expected: { databaseId: s.databaseId, revision: s.revision, generation: s.generation }, next, afterCommitAction: action === null ? null : ticket(next, action) });
+}
+var unchanged = (s) => frozen({ kind: "unchanged", state: s });
+function nextGeneration(s) {
+  require2(s.generation < Number.MAX_SAFE_INTEGER, "counter-exhausted");
+  return s.generation + 1;
+}
+function transitionRecoveryState(stateInput, eventInput) {
+  const s = parseRecoveryState(stateInput);
+  if (!s)
+    return frozen({ kind: "reject", reason: "invalid-state" });
+  try {
+    const event = snapshot2(eventInput), head = event;
+    require2(head && typeof head === "object" && !Array.isArray(head));
+    const type = text2(head.type, 64), p = s.pending;
+    if (type === "activate") {
+      object(event, ["type"]);
+      require2(s.bootstrap === "prepared", "invalid-transition");
+      return commit(s, { bootstrap: "active" });
     }
+    require2(s.bootstrap === "active", "invalid-transition");
+    if (type === "signout") {
+      object(event, ["type"]);
+      return commit(s, { active: null, pending: null, generation: nextGeneration(s) });
+    }
+    if (type === "clear-expired") {
+      object(event, ["type"]);
+      require2(p?.stage === "expired", "invalid-transition");
+      return commit(s, { pending: null, generation: nextGeneration(s) });
+    }
+    if (type === "prepare-registration") {
+      const e2 = object(event, ["type", "operationId", "body", "claimSecret", "pickupId", "candidateToken"]);
+      require2(s.active === null, "invalid-transition");
+      const body = creation(e2.body, s);
+      require2(isCreditsClaimSecret(e2.claimSecret) && isCreditsDeviceToken(e2.candidateToken));
+      const identity = { kind: "registration-v2", operationId: text2(e2.operationId, 36, UUID3), canonicalCreateBody: canonical(body), claimSecret: e2.claimSecret, pickupId: text2(e2.pickupId, 36, UUID3), candidateToken: e2.candidateToken };
+      if (p) {
+        require2(p.kind === "registration-v2" && canonical({ ...p, stage: null, created: null }) === canonical({ ...identity, stage: null, created: null }), "invalid-transition");
+        return unchanged(s);
+      }
+      return commit(s, { pending: { ...identity, stage: "create-pending", created: null } }, "create-v2");
+    }
+    if (type === "prepare-topup") {
+      const e2 = object(event, ["type", "operationId", "body"]);
+      require2(s.active, "invalid-transition");
+      const operationId = text2(e2.operationId, 36, UUID3), body = topupBody(e2.body, s, operationId);
+      if (p) {
+        require2(p.kind === "topup-v1" && p.operationId === operationId && p.canonicalCreateBody === body, "invalid-transition");
+        return unchanged(s);
+      }
+      return commit(s, { pending: { kind: "topup-v1", operationId, canonicalCreateBody: body, stage: "prepared", claim: null } });
+    }
+    if (type === "dispatch-topup") {
+      object(event, ["type"]);
+      require2(p?.kind === "topup-v1" && p.stage === "prepared", "invalid-transition");
+      return commit(s, { pending: { ...p, stage: "create-dispatched" } }, "create-topup-v1");
+    }
+    if (type === "begin-pickup") {
+      object(event, ["type"]);
+      require2(p?.kind === "registration-v2" && ["paid", "pickup-pending"].includes(p.stage), "invalid-transition");
+      return p.stage === "pickup-pending" ? unchanged(s) : commit(s, { pending: { ...p, stage: "pickup-pending" } }, "pickup-v2");
+    }
+    if (type === "uncertain") {
+      const e2 = object(event, ["type", "ticket"]);
+      checkTicket(s, e2.ticket);
+      return unchanged(s);
+    }
+    const e = object(event, ["type", "ticket", "response"]);
+    if (type === "created-v2") {
+      checkTicket(s, e.ticket, "create-v2");
+      require2(p?.kind === "registration-v2");
+      const body = creation(p.canonicalCreateBody, s);
+      const created = parseCreditsClaimCreatedV2(e.response, { creationId: body.creationId, productId: s.productId, deviceId: s.deviceId, serviceOrigin: s.serviceOrigin });
+      require2(created);
+      return commit(s, { pending: { ...p, created, stage: "payment-pending" } });
+    }
+    if (type === "status-v2" || type === "pickup-v2" || type === "ack-v2" || type === "credential-v2") {
+      checkTicket(s, e.ticket, type);
+      require2(p?.kind === "registration-v2" && p.created);
+      const operation = type.slice(0, -3);
+      const response = parseCreditsPickupResponseV2(e.response, { operation, binding: p.created.binding, pickupId: p.pickupId });
+      require2(response);
+      if (type === "status-v2") {
+        if (response.pickupState === "revoked")
+          return commit(s, { pending: { ...p, stage: "revoked" } });
+        if (response.payment === "expired") {
+          require2(p.stage === "payment-pending", "invalid-transition");
+          return commit(s, { pending: { ...p, stage: "expired" } });
+        }
+        if (response.payment === "pending") {
+          require2(p.stage === "payment-pending", "invalid-transition");
+          return unchanged(s);
+        }
+        return p.stage === "payment-pending" ? commit(s, { pending: { ...p, stage: "paid" } }) : unchanged(s);
+      }
+      if (type === "pickup-v2")
+        return commit(s, { pending: { ...p, stage: "ack-pending" } }, "ack-v2");
+      if (response.pickupState !== "acknowledged" || response.usable !== true)
+        return unchanged(s);
+      return commit(s, { active: { token: p.candidateToken, source: "pickup-v2", binding: p.created.binding }, pending: null });
+    }
+    if (type === "created-topup-v1") {
+      checkTicket(s, e.ticket, "create-topup-v1");
+      require2(p?.kind === "topup-v1");
+      const response = parseCreditsClaim(e.response);
+      require2(response && response.claimSecret === undefined && response.product.id === s.productId && response.url === `${s.serviceOrigin}/t/${encodeURIComponent(response.claimId)}`);
+      return commit(s, { pending: { ...p, stage: "claim-pending", claim: { claimId: response.claimId, expiresAt: response.expiresAt, payUrl: response.url } } });
+    }
+    if (type === "status-topup-v1") {
+      checkTicket(s, e.ticket, "status-topup-v1");
+      require2(p?.kind === "topup-v1" && p.claim);
+      const response = parseCreditsClaimStatus(e.response);
+      require2(response && response.token === undefined && response.claimId === p.claim.claimId && response.expiresAt === p.claim.expiresAt && (!(response.state === "pending" || response.state === "expired") || response.paidAt === undefined));
+      if (response.state === "pending")
+        return unchanged(s);
+      return commit(s, { pending: response.state === "expired" ? { ...p, stage: "expired" } : null });
+    }
+    return fail2();
   } catch (error) {
-    outcome = { code: "internal_error", exitCode: 1, message: `The credits command failed: ${sanitizeText(error, 200)}` };
+    return frozen({ kind: "reject", reason: error instanceof Invalid ? error.reason : "invalid-event" });
   }
-  if (isFailure(outcome)) {
-    if (wantsJson) {
-      await emitter.out(json({
-        error: outcome.code,
-        message: outcome.message,
-        ...outcome.service === undefined ? {} : { service: outcome.service },
-        ...outcome.fields ?? {}
-      }));
-    }
-    await emitter.err(`${outcome.message}
-`);
-  } else {
-    if (wantsJson || outcome.jsonAlways === true)
-      await emitter.out(json(outcome.json));
-    if (!wantsJson && outcome.human !== "")
-      await emitter.err(outcome.human);
-  }
-  return { exitCode: outcome.exitCode, stdout: emitter.stdout, stderr: emitter.stderr };
 }
 export {
-  runCreditsCommand,
-  readStoredDeviceToken,
-  emitCreditsRequired,
-  creditsStateDirectory
+  transitionRecoveryState,
+  recoveryAction,
+  readRecoveryToken,
+  prepareRecoveryState,
+  parseRecoveryState,
+  RECOVERY_STATE_SCHEMA,
+  RECOVERY_MAX_BYTES
 };

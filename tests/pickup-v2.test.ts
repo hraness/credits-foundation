@@ -195,8 +195,8 @@ describe("inactive credits v2 wire", () => {
 
   test("JSON duplicate keys, malformed input, Unicode and cycles fail closed", () => {
     const json = JSON.stringify(create);
-    expect(parseCreditsClaimCreateV2(json.replace('{', '{"creationId":"other",'))).toBeNull();
-    expect(parseCreditsClaimCreateV2(json.replace('{', '{"creation\\u0049d":"other",'))).toBeNull();
+    expect(parseCreditsClaimCreateV2('{"creationId":"other",' + json.slice(1))).toBeNull();
+    expect(parseCreditsClaimCreateV2('{"creation\\u0049d":"other",' + json.slice(1))).toBeNull();
     for (const value of ["{", "null", "[]", "true", json + "x", { ...create, email: "\ud800@x.test" }, { ...create, device: { id: deviceId, label: "\udc00" } }]) {
       expect(parseCreditsClaimCreateV2(value)).toBeNull();
     }

@@ -106,6 +106,31 @@ v2 endpoints. Existing CLI commands below continue to use v1. See the
 [v2 wire reference](docs/pickup-v2.md) for the exact caller bindings, limits
 and compatibility boundary.
 
+## Retain a recoverable credential handoff
+
+`@hraness/credits-foundation/recovery` exports the pure recovery state model.
+It binds a saved creation request, candidate credential and pickup operation
+before a caller dispatches them, then accepts only responses for that identity.
+The optional `@hraness/credits-foundation/recovery/bun` entry stores those
+transitions with a SQLite transaction and a revision/generation check.
+
+The store is initially qualified only for Bun 1.3.14 on macOS arm64 with APFS
+and its pinned SQLite runtime. Other environments return `unsupported-runtime`
+or `unsupported-filesystem`. Ordinary Node imports select a no-I/O stub without
+loading `bun:sqlite`; the root and pure recovery entries remain browser safe.
+Importing an entry neither migrates state nor calls the credits service.
+
+Adoption is an explicit operation. It preserves an eligible legacy identity,
+fences older writers, and refuses a pending once-only legacy claim secret.
+A returned storage error may follow a committed transition: read the same
+store to reconcile it. Never invent a new identity to recover an uncertain
+write. See the [state contract](docs/recovery-state.md) and
+[storage contract](docs/recovery-sqlite.md) for bootstrap, concurrency and
+interruption behavior. Process-death tests do not establish power-loss safety.
+
+These APIs provide local recovery primitives. Existing `./node` commands still
+use v1; no transport, provider dispatch or paid endpoint is activated.
+
 ## Connect a CLI
 
 Import `runCreditsCommand` from `@hraness/credits-foundation/node`, route the

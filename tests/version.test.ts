@@ -7,7 +7,7 @@ describe("package invariants", () => {
     const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
     expect(CREDITS_FOUNDATION_VERSION).toBe(manifest.version);
     expect(manifest.dependencies).toBeUndefined();
-    expect(Object.keys(manifest.exports)).toEqual([".", "./node", "./server"]);
+    expect(Object.keys(manifest.exports)).toEqual([".", "./node", "./server", "./recovery", "./recovery/bun"]);
   });
 
   test("the root and its helpers import no Node builtins", async () => {

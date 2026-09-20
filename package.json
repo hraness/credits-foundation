@@ -1,6 +1,6 @@
 {
   "name": "@hraness/credits-foundation",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Prepaid credits for Hraness products: shared money and pricing vocabulary, the credits-required envelope, a CLI adapter for the credits service, and a product backend client.",
   "license": "MIT",
   "type": "module",
@@ -11,11 +11,13 @@
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./node": { "types": "./dist/node.d.ts", "import": "./dist/node.js" },
-    "./server": { "types": "./dist/server.d.ts", "import": "./dist/server.js" }
+    "./server": { "types": "./dist/server.d.ts", "import": "./dist/server.js" },
+    "./recovery": { "types": "./dist/recovery.d.ts", "import": "./dist/recovery.js" },
+    "./recovery/bun": { "types": "./dist/recovery-bun.d.ts", "bun": "./dist/recovery-bun.js", "default": "./dist/recovery-unavailable.js" }
   },
-  "files": ["src/index.ts", "src/node.ts", "src/server.ts", "src/internal.ts", "src/transport.ts", "src/pickup-v2.ts", "dist", "docs", "README.md", "LICENSE"],
+  "files": ["src/index.ts", "src/node.ts", "src/server.ts", "src/internal.ts", "src/transport.ts", "src/pickup-v2.ts", "src/recovery.ts", "src/recovery-state.ts", "src/recovery-bun.ts", "src/recovery-sqlite.ts", "src/recovery-unavailable.ts", "dist", "docs", "README.md", "LICENSE"],
   "scripts": {
-    "build": "bun build src/index.ts src/node.ts src/server.ts --target node --format esm --outdir dist && tsc --project tsconfig.build.json",
+    "build": "bun build src/index.ts src/node.ts src/server.ts src/recovery.ts src/recovery-unavailable.ts --target node --format esm --outdir dist && bun build src/recovery-bun.ts --target bun --format esm --outdir dist && tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
     "test:package": "bun run scripts/package-smoke.ts",

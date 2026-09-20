@@ -8,5 +8,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/index.ts", "src/node.ts", "src/server.ts"]
+  "include": ["src/index.ts", "src/node.ts", "src/server.ts", "src/recovery.ts", "src/recovery-bun.ts", "src/recovery-unavailable.ts"]
 }

@@ -4,7 +4,7 @@ import { constants as fsConstants, chmodSync, existsSync, linkSync, lstatSync, m
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapRecoveryStore, checkRecoveryFence, commitRecoveryEvent, readRecoveryStore, RECOVERY_SQLITE_PROFILE, type RecoveryStoreResult, type RecoveryLocation } from "../src/recovery-sqlite.js";
-import type { RecoveryState } from "../src/recovery-state.js";
+import { recoveryAction, type RecoveryState } from "../src/recovery-state.js";
 import { readStoredDeviceToken, runCreditsCommand } from "../src/node.js";
 import { CLAIM_ID, CLAIM_SECRET, EXPIRES_AT, claimStatus, profile, reply, stubFetch } from "./helpers.js";
 
@@ -103,6 +103,50 @@ test.skipIf(refusedProfile === null)("unqualified host rejects all storage opera
 });
 
 describe.skipIf(refusedProfile !== null)("recovery SQLite exact-host file qualification", () => {
+  test("returning topup-v2 persists intent, reconciles late paid status and fences old writers", async () => {
+    const loc = setup(); seed(loc, legacy({ token })); const start = value(bootstrapRecoveryStore(loc, ids));
+    const marker = readFileSync(paths(loc).marker, "utf8"), operationId = "00000000-0000-4000-8000-000000000008";
+    const body = { schemaVersion: "hraness-credits-topup-create-v2", creationId: operationId, product: loc.productId, device: { id: ids.deviceId }, packId: "p25" };
+    const prepared = value(commitRecoveryEvent(loc, counters(start), { type: "prepare-topup-v2", operationId, body }));
+    expect(prepared.kind).toBe("commit"); if (prepared.kind !== "commit") throw new Error("Fixture commit failed.");
+    const pending = value(readRecoveryStore(loc)); expect(pending).toEqual(prepared.next); expect(pending.active?.token).toBe(token);
+    expect(pending.pending?.kind === "topup-v2" && pending.pending.originalToken).toBe(token);
+    expect(recoveryAction(pending, "create-topup-v2")).toEqual(prepared.afterCommitAction);
+    expect(commitRecoveryEvent(loc, counters(start), { type: "prepare-topup-v2", operationId, body })).toEqual({ ok: false, reason: "stale-state" });
+    const createdAt = "2026-09-16T12:00:00.000Z", expiresAt = "2026-09-17T12:00:00.000Z", claimId = "topup_store";
+    value(commitRecoveryEvent(loc, counters(pending), { type: "created-topup-v2", ticket: prepared.afterCommitAction,
+      response: { schemaVersion: "hraness-credits-topup-created-v2", creationId: operationId, binding: { claimId, productId: loc.productId, deviceId: ids.deviceId }, createdAt, expiresAt, payUrl: `${loc.serviceOrigin}/t/${claimId}` } }));
+    const known = value(readRecoveryStore(loc)), ticket = recoveryAction(known, "status-topup-v2")!;
+    const status = { schemaVersion: "hraness-credits-claim-status-v1", claimId, state: "expired", expiresAt };
+    value(commitRecoveryEvent(loc, counters(known), { type: "status-topup-v2", ticket, response: status }));
+    const expired = value(readRecoveryStore(loc)), fresh = recoveryAction(expired, "status-topup-v2")!;
+    expect(expired.pending?.stage).toBe("expired"); expect(fresh.preparedRevision).toBe(expired.revision);
+    expect(commitRecoveryEvent(loc, counters(known), { type: "status-topup-v2", ticket, response: { ...status, state: "paid", paidAt: "2026-09-20T12:00:00.000Z" } })).toEqual({ ok: false, reason: "stale-state" });
+    const oldWriter = await runCreditsCommand(profile, ["signout", "--json"], { stateDirectory: paths(loc).dir, fetch: async () => { throw new Error("No old-writer network."); } });
+    expect(oldWriter.exitCode).toBe(1); expect(value(readRecoveryStore(loc))).toEqual(expired);
+    value(commitRecoveryEvent(loc, counters(expired), { type: "status-topup-v2", ticket: fresh, response: { ...status, state: "paid", paidAt: "2026-09-20T12:00:00.000Z" } }));
+    const paid = value(readRecoveryStore(loc)); expect(paid.pending).toBeNull(); expect(paid.active).toEqual(start.active); expect(paid.generation).toBe(start.generation + 1);
+    value(commitRecoveryEvent(loc, counters(paid), { type: "signout" }));
+    const signed = value(readRecoveryStore(loc)); expect(signed.active).toBeNull(); expect(signed.pending).toBeNull(); expect(JSON.stringify(signed)).not.toContain(token);
+    expect(readFileSync(paths(loc).marker, "utf8")).toBe(marker);
+  });
+  test("returning topup-v2 crash and lost commit result recover only the saved intent", async () => {
+    for (const mode of ["topup-before-commit", "topup-after-commit", "topup-commit-after-failure"]) {
+      const loc = setup(); seed(loc, legacy({ token })); const start = value(bootstrapRecoveryStore(loc, ids));
+      const operation = await child(loc, mode);
+      await operation.collect(mode !== "topup-commit-after-failure");
+      if (mode === "topup-commit-after-failure") expect(operation.message).toEqual({ ok: false, reason: "storage-uncertain" });
+      else expect(operation.message).toEqual({ phase: mode });
+      const saved = value(readRecoveryStore(loc)); expect(saved.active).toEqual(start.active);
+      if (mode === "topup-before-commit") expect(saved).toEqual(start);
+      else {
+        expect(saved.pending?.kind).toBe("topup-v2"); expect(saved.pending?.stage).toBe("create-pending");
+        expect(saved.pending?.kind === "topup-v2" && saved.pending.originalToken).toBe(token);
+        expect(JSON.parse(saved.pending!.canonicalCreateBody!)).toEqual({ schemaVersion: "hraness-credits-topup-create-v2", creationId: "00000000-0000-4000-8000-000000000003", product: loc.productId, device: { id: ids.deviceId } });
+        expect(recoveryAction(saved, "create-topup-v2")?.preparedRevision).toBe(saved.revision);
+      }
+    }
+  });
   test("fresh adoption is fenced, private, bounded, immutable and idempotent only with null fresh", async () => {
     const loc = setup(), p = paths(loc), state = value(bootstrapRecoveryStore(loc, ids));
     expect(state).toMatchObject({ bootstrap: "active", revision: 1, generation: 0, ...ids, active: null, pending: null });

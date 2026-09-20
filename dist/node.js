@@ -76,6 +76,8 @@ function errorCode(error) {
 }
 
 // src/pickup-v2.ts
+var CREDITS_TOPUP_CREATE_V2 = "hraness-credits-topup-create-v2";
+var CREDITS_TOPUP_CREATED_V2 = "hraness-credits-topup-created-v2";
 var CREDITS_CLAIM_CREATE_V2 = "hraness-credits-claim-create-v2";
 var CREDITS_CLAIM_CREATED_V2 = "hraness-credits-claim-created-v2";
 var CREDITS_PICKUP_REQUEST_V2 = "hraness-credits-pickup-request-v2";
@@ -275,33 +277,74 @@ function timestamp2(value) {
     return fail();
   return raw;
 }
+function readCreation(input, schemaVersion) {
+  const row = shape2(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
+  if (row.schemaVersion !== schemaVersion)
+    return fail();
+  const device = shape2(row.device, ["id"], ["label"]);
+  return {
+    schemaVersion,
+    creationId: text(row.creationId, 36, UUID2),
+    product: text(row.product, 32, PRODUCT),
+    device: { id: text(device.id, 36, UUID2), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
+    ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
+    ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
+  };
+}
 function parseCreditsClaimCreateV2(value) {
-  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => {
-    const row = shape2(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
-    if (row.schemaVersion !== CREDITS_CLAIM_CREATE_V2)
-      return fail();
-    const device = shape2(row.device, ["id"], ["label"]);
-    return {
-      schemaVersion: CREDITS_CLAIM_CREATE_V2,
-      creationId: text(row.creationId, 36, UUID2),
-      product: text(row.product, 32, PRODUCT),
-      device: { id: text(device.id, 36, UUID2), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
-      ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
-      ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
-    };
-  });
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => readCreation(input, CREDITS_CLAIM_CREATE_V2));
+}
+function parseCreditsTopupCreateV2(value) {
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => readCreation(input, CREDITS_TOPUP_CREATE_V2));
+}
+function readCreated(input, expected, schemaVersion) {
+  const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
+  const creationId = text(e.creationId, 36, UUID2), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID2);
+  const serviceOrigin = origin2(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
+  const row = shape2(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
+  const bound = binding(row.binding, UUID2), createdAt = timestamp2(row.createdAt), expiresAt = timestamp2(row.expiresAt);
+  const payUrl = text(row.payUrl, 2048);
+  if (row.schemaVersion !== schemaVersion || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+    return fail();
+  return { schemaVersion, creationId, binding: bound, createdAt, expiresAt, payUrl };
 }
 function parseCreditsClaimCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => readCreated(input, expected, CREDITS_CLAIM_CREATED_V2));
+}
+function parseCreditsTopupCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => readCreated(input, expected, CREDITS_TOPUP_CREATED_V2));
+}
+function parseCreditsTopupStatusV2(value, expected) {
   return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
-    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
-    const creationId = text(e.creationId, 36, UUID2), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID2);
-    const serviceOrigin = origin2(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
-    const row = shape2(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
-    const bound = binding(row.binding, UUID2), createdAt = timestamp2(row.createdAt), expiresAt = timestamp2(row.expiresAt);
-    const payUrl = text(row.payUrl, 2048);
-    if (row.schemaVersion !== CREDITS_CLAIM_CREATED_V2 || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["claimId", "createdAt", "expiresAt"]);
+    const claimId = text(e.claimId, 64, CLAIM), createdAt = timestamp2(e.createdAt), expiresAt = timestamp2(e.expiresAt);
+    if (Date.parse(expiresAt) <= Date.parse(createdAt))
       return fail();
-    return { schemaVersion: CREDITS_CLAIM_CREATED_V2, creationId, binding: bound, createdAt, expiresAt, payUrl };
+    const row = shape2(input, ["schemaVersion", "claimId", "state", "expiresAt"], ["paidAt", "balance"]);
+    const state = choice(row.state, ["pending", "paid", "expired"]);
+    if (row.schemaVersion !== "hraness-credits-claim-status-v1" || row.claimId !== claimId || row.expiresAt !== expiresAt || !timestamp(row.expiresAt) || state === "paid" !== "paidAt" in row)
+      return fail();
+    const paidAt = "paidAt" in row ? timestamp2(row.paidAt) : undefined;
+    if (paidAt !== undefined && (!timestamp(paidAt) || Date.parse(paidAt) < Date.parse(createdAt)))
+      return fail();
+    let balance;
+    if ("balance" in row) {
+      const money = shape2(row.balance, ["microUsd", "credits", "usd"]);
+      const microUsd = integer(money.microUsd, -1000000000000000, 1000000000000000), credits = integer(money.credits), usd = text(money.usd, 32);
+      const amount = BigInt(microUsd), magnitude = amount < 0n ? -amount : amount;
+      const projectedUsd = `${amount < 0n ? "-" : ""}${magnitude / 1000000n}.${String(magnitude % 1000000n / 10000n).padStart(2, "0")}`;
+      if (credits !== Number(amount / 10000n) || usd !== projectedUsd)
+        return fail();
+      balance = { microUsd, credits, usd };
+    }
+    return {
+      schemaVersion: "hraness-credits-claim-status-v1",
+      claimId,
+      state,
+      expiresAt,
+      ...paidAt === undefined ? {} : { paidAt },
+      ...balance === undefined ? {} : { balance }
+    };
   });
 }
 function parseCreditsPickupRequestV2(value) {
@@ -377,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.3.0";
+var CREDITS_FOUNDATION_VERSION = "0.4.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;

@@ -1,4 +1,5 @@
-/** Inactive, portable v2 wire parsing only. No transport, credential issuance or state writes. */
+export declare const CREDITS_TOPUP_CREATE_V2 = "hraness-credits-topup-create-v2";
+export declare const CREDITS_TOPUP_CREATED_V2 = "hraness-credits-topup-created-v2";
 export declare const CREDITS_CLAIM_CREATE_V2 = "hraness-credits-claim-create-v2";
 export declare const CREDITS_CLAIM_CREATED_V2 = "hraness-credits-claim-created-v2";
 export declare const CREDITS_PICKUP_REQUEST_V2 = "hraness-credits-pickup-request-v2";
@@ -29,6 +30,30 @@ export type CreditsClaimCreatedV2 = Readonly<{
     createdAt: string;
     expiresAt: string;
     payUrl: string;
+}>;
+export type CreditsTopupCreateV2 = Readonly<Omit<CreditsClaimCreateV2, "schemaVersion"> & {
+    schemaVersion: typeof CREDITS_TOPUP_CREATE_V2;
+}>;
+export type CreditsTopupCreatedV2 = Readonly<Omit<CreditsClaimCreatedV2, "schemaVersion"> & {
+    schemaVersion: typeof CREDITS_TOPUP_CREATED_V2;
+}>;
+/** Payment status for a v2-created top-up uses the existing v1 status wire. */
+export type CreditsTopupStatusV2 = Readonly<{
+    schemaVersion: "hraness-credits-claim-status-v1";
+    claimId: string;
+    state: "pending" | "paid" | "expired";
+    expiresAt: string;
+    paidAt?: string;
+    balance?: Readonly<{
+        microUsd: number;
+        credits: number;
+        usd: string;
+    }>;
+}>;
+export type CreditsTopupStatusExpectationV2 = Readonly<{
+    claimId: string;
+    createdAt: string;
+    expiresAt: string;
 }>;
 export type CreditsCreationExpectationV2 = Readonly<{
     creationId: string;
@@ -108,8 +133,13 @@ export type CreditsErrorV2 = Readonly<{
 }>;
 /** Accept an object or bounded JSON text. The claim bearer is deliberately absent from the body. */
 export declare function parseCreditsClaimCreateV2(value: unknown): CreditsClaimCreateV2 | null;
+/** Existing device authorization belongs in the header, never in this body. */
+export declare function parseCreditsTopupCreateV2(value: unknown): CreditsTopupCreateV2 | null;
 /** Bind the original creation tuple; provide claimId on a replay after its first accepted response. */
 export declare function parseCreditsClaimCreatedV2(value: unknown, expected: CreditsCreationExpectationV2): CreditsClaimCreatedV2 | null;
+export declare function parseCreditsTopupCreatedV2(value: unknown, expected: CreditsCreationExpectationV2): CreditsTopupCreatedV2 | null;
+/** Strict, token-free v1 status subset for payment-only v2 top-ups. Does not authenticate a response. */
+export declare function parseCreditsTopupStatusV2(value: unknown, expected: CreditsTopupStatusExpectationV2): CreditsTopupStatusV2 | null;
 export declare function parseCreditsPickupRequestV2(value: unknown): CreditsPickupRequestV2 | null;
 /** A status response may say unregistered despite an already persisted local candidate. */
 export declare function parseCreditsPickupResponseV2(value: unknown, expected: CreditsPickupExpectationV2): CreditsPickupResponseV2 | null;

@@ -76,6 +76,8 @@ function errorCode(error) {
 }
 
 // src/pickup-v2.ts
+var CREDITS_TOPUP_CREATE_V2 = "hraness-credits-topup-create-v2";
+var CREDITS_TOPUP_CREATED_V2 = "hraness-credits-topup-created-v2";
 var CREDITS_CLAIM_CREATE_V2 = "hraness-credits-claim-create-v2";
 var CREDITS_CLAIM_CREATED_V2 = "hraness-credits-claim-created-v2";
 var CREDITS_PICKUP_REQUEST_V2 = "hraness-credits-pickup-request-v2";
@@ -275,33 +277,74 @@ function timestamp2(value) {
     return fail();
   return raw;
 }
+function readCreation(input, schemaVersion) {
+  const row = shape2(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
+  if (row.schemaVersion !== schemaVersion)
+    return fail();
+  const device = shape2(row.device, ["id"], ["label"]);
+  return {
+    schemaVersion,
+    creationId: text(row.creationId, 36, UUID2),
+    product: text(row.product, 32, PRODUCT),
+    device: { id: text(device.id, 36, UUID2), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
+    ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
+    ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
+  };
+}
 function parseCreditsClaimCreateV2(value) {
-  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => {
-    const row = shape2(input, ["schemaVersion", "creationId", "product", "device"], ["email", "packId"]);
-    if (row.schemaVersion !== CREDITS_CLAIM_CREATE_V2)
-      return fail();
-    const device = shape2(row.device, ["id"], ["label"]);
-    return {
-      schemaVersion: CREDITS_CLAIM_CREATE_V2,
-      creationId: text(row.creationId, 36, UUID2),
-      product: text(row.product, 32, PRODUCT),
-      device: { id: text(device.id, 36, UUID2), ..."label" in device ? { label: displayText(device.label, 64) } : {} },
-      ..."email" in row ? { email: text(row.email, 320, EMAIL) } : {},
-      ..."packId" in row ? { packId: text(row.packId, 32, PRODUCT) } : {}
-    };
-  });
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => readCreation(input, CREDITS_CLAIM_CREATE_V2));
+}
+function parseCreditsTopupCreateV2(value) {
+  return parsed(value, CREDITS_V2_MAX_REQUEST_BYTES, (input) => readCreation(input, CREDITS_TOPUP_CREATE_V2));
+}
+function readCreated(input, expected, schemaVersion) {
+  const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
+  const creationId = text(e.creationId, 36, UUID2), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID2);
+  const serviceOrigin = origin2(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
+  const row = shape2(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
+  const bound = binding(row.binding, UUID2), createdAt = timestamp2(row.createdAt), expiresAt = timestamp2(row.expiresAt);
+  const payUrl = text(row.payUrl, 2048);
+  if (row.schemaVersion !== schemaVersion || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+    return fail();
+  return { schemaVersion, creationId, binding: bound, createdAt, expiresAt, payUrl };
 }
 function parseCreditsClaimCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => readCreated(input, expected, CREDITS_CLAIM_CREATED_V2));
+}
+function parseCreditsTopupCreatedV2(value, expected) {
+  return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => readCreated(input, expected, CREDITS_TOPUP_CREATED_V2));
+}
+function parseCreditsTopupStatusV2(value, expected) {
   return parsed(value, CREDITS_V2_MAX_RESPONSE_BYTES, (input) => {
-    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["creationId", "productId", "deviceId", "serviceOrigin"], ["claimId"]);
-    const creationId = text(e.creationId, 36, UUID2), productId = text(e.productId, 32, PRODUCT), deviceId = text(e.deviceId, 36, UUID2);
-    const serviceOrigin = origin2(e.serviceOrigin), claimId = "claimId" in e ? text(e.claimId, 128, CLAIM) : undefined;
-    const row = shape2(input, ["schemaVersion", "creationId", "binding", "createdAt", "expiresAt", "payUrl"]);
-    const bound = binding(row.binding, UUID2), createdAt = timestamp2(row.createdAt), expiresAt = timestamp2(row.expiresAt);
-    const payUrl = text(row.payUrl, 2048);
-    if (row.schemaVersion !== CREDITS_CLAIM_CREATED_V2 || row.creationId !== creationId || bound.productId !== productId || bound.deviceId !== deviceId || claimId !== undefined && claimId !== bound.claimId || Date.parse(expiresAt) <= Date.parse(createdAt) || payUrl !== `${serviceOrigin}/t/${encodeURIComponent(bound.claimId)}`)
+    const e = shape2(snapshot(expected, CREDITS_V2_MAX_REQUEST_BYTES), ["claimId", "createdAt", "expiresAt"]);
+    const claimId = text(e.claimId, 64, CLAIM), createdAt = timestamp2(e.createdAt), expiresAt = timestamp2(e.expiresAt);
+    if (Date.parse(expiresAt) <= Date.parse(createdAt))
       return fail();
-    return { schemaVersion: CREDITS_CLAIM_CREATED_V2, creationId, binding: bound, createdAt, expiresAt, payUrl };
+    const row = shape2(input, ["schemaVersion", "claimId", "state", "expiresAt"], ["paidAt", "balance"]);
+    const state = choice(row.state, ["pending", "paid", "expired"]);
+    if (row.schemaVersion !== "hraness-credits-claim-status-v1" || row.claimId !== claimId || row.expiresAt !== expiresAt || !timestamp(row.expiresAt) || state === "paid" !== "paidAt" in row)
+      return fail();
+    const paidAt = "paidAt" in row ? timestamp2(row.paidAt) : undefined;
+    if (paidAt !== undefined && (!timestamp(paidAt) || Date.parse(paidAt) < Date.parse(createdAt)))
+      return fail();
+    let balance;
+    if ("balance" in row) {
+      const money = shape2(row.balance, ["microUsd", "credits", "usd"]);
+      const microUsd = integer(money.microUsd, -1000000000000000, 1000000000000000), credits = integer(money.credits), usd = text(money.usd, 32);
+      const amount = BigInt(microUsd), magnitude = amount < 0n ? -amount : amount;
+      const projectedUsd = `${amount < 0n ? "-" : ""}${magnitude / 1000000n}.${String(magnitude % 1000000n / 10000n).padStart(2, "0")}`;
+      if (credits !== Number(amount / 10000n) || usd !== projectedUsd)
+        return fail();
+      balance = { microUsd, credits, usd };
+    }
+    return {
+      schemaVersion: "hraness-credits-claim-status-v1",
+      claimId,
+      state,
+      expiresAt,
+      ...paidAt === undefined ? {} : { paidAt },
+      ...balance === undefined ? {} : { balance }
+    };
   });
 }
 function parseCreditsPickupRequestV2(value) {
@@ -377,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.3.0";
+var CREDITS_FOUNDATION_VERSION = "0.4.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -855,7 +898,7 @@ var RECOVERY_MAX_BYTES = 32768;
 var PRODUCT2 = /^[a-z0-9_-]{1,32}$/u;
 var UUID3 = /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/u;
 var CLAIM2 = /^[A-Za-z0-9_-]{1,128}$/u;
-var ACTIONS = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1"];
+var ACTIONS = ["create-v2", "status-v2", "pickup-v2", "credential-v2", "ack-v2", "create-topup-v1", "status-topup-v1", "create-topup-v2", "status-topup-v2"];
 var encoder2 = new TextEncoder;
 
 class Invalid extends Error {
@@ -1021,6 +1064,11 @@ function topupBody(body, s, operationId) {
   require2(encoder2.encode(out).length <= 4096);
   return out;
 }
+function topupV2Body(body, s, operationId) {
+  const parsed2 = parseCreditsTopupCreateV2(body);
+  require2(parsed2 && parsed2.product === s.productId && parsed2.device.id === s.deviceId && parsed2.creationId === operationId);
+  return parsed2;
+}
 function readState(v) {
   const r = object(v, ["schemaVersion", "databaseId", "productId", "serviceOrigin", "deviceId", "revision", "generation", "bootstrap", "active", "pending"]);
   require2(r.schemaVersion === RECOVERY_STATE_SCHEMA && origin(r.serviceOrigin));
@@ -1046,7 +1094,7 @@ function readState(v) {
     state.active = { token: a.token, source, binding: a.binding === null ? null : bound(a.binding, state.productId, state.deviceId) };
   }
   if (r.pending !== null) {
-    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim"]).kind;
+    const kind = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage"], ["claimSecret", "pickupId", "candidateToken", "created", "claim", "originalToken"]).kind;
     if (kind === "registration-v2") {
       require2(state.active === null && state.bootstrap === "active");
       const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claimSecret", "pickupId", "candidateToken", "created"]);
@@ -1056,6 +1104,21 @@ function readState(v) {
       const created = p.created === null ? null : parseCreditsClaimCreatedV2(p.created, { creationId: body.creationId, productId: state.productId, deviceId: state.deviceId, serviceOrigin: state.serviceOrigin });
       require2(stage === "create-pending" === (p.created === null) && (p.created === null || created !== null));
       state.pending = { kind, operationId: text2(p.operationId, 36, UUID3), canonicalCreateBody: bodyText, stage, created, claimSecret: p.claimSecret, pickupId: text2(p.pickupId, 36, UUID3), candidateToken: p.candidateToken };
+    } else if (kind === "topup-v2") {
+      require2(state.active !== null && state.bootstrap === "active");
+      const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "originalToken", "created"]);
+      const operationId = text2(p.operationId, 36, UUID3), bodyText = text2(p.canonicalCreateBody, 4096);
+      const body = topupV2Body(bodyText, state, operationId);
+      require2(canonical(body) === bodyText && p.originalToken === state.active.token);
+      const stage = choice2(p.stage, ["create-pending", "claim-pending", "expired"]);
+      const created = p.created === null ? null : parseCreditsTopupCreatedV2(p.created, {
+        creationId: operationId,
+        productId: state.productId,
+        deviceId: state.deviceId,
+        serviceOrigin: state.serviceOrigin
+      });
+      require2(stage === "create-pending" === (p.created === null) && (p.created === null || created && isCreditsClaimId(created.binding.claimId)));
+      state.pending = { kind, operationId, canonicalCreateBody: bodyText, originalToken: state.active.token, stage, created };
     } else {
       require2(kind === "topup-v1" && state.active !== null);
       const p = object(r.pending, ["kind", "operationId", "canonicalCreateBody", "stage", "claim"]), operationId = text2(p.operationId, 36, UUID3);
@@ -1145,6 +1208,8 @@ function allowed(s, action, dispatchReply = false) {
   const p = s.pending;
   if (p.kind === "topup-v1")
     return action === "status-topup-v1" ? p.stage === "claim-pending" : action === "create-topup-v1" && dispatchReply && p.stage === "create-dispatched";
+  if (p.kind === "topup-v2")
+    return action === "create-topup-v2" ? p.stage === "create-pending" : action === "status-topup-v2" && ["claim-pending", "expired"].includes(p.stage);
   return action === "create-v2" ? p.stage === "create-pending" : action === "status-v2" ? !["create-pending", "expired", "revoked"].includes(p.stage) : action === "pickup-v2" ? p.stage === "pickup-pending" : (action === "ack-v2" || action === "credential-v2") && p.stage === "ack-pending";
 }
 function ticket(s, action) {
@@ -1223,6 +1288,16 @@ function transitionRecoveryState(stateInput, eventInput) {
       }
       return commit(s, { pending: { kind: "topup-v1", operationId, canonicalCreateBody: body, stage: "prepared", claim: null } });
     }
+    if (type === "prepare-topup-v2") {
+      const e2 = object(event, ["type", "operationId", "body"]);
+      require2(s.active, "invalid-transition");
+      const operationId = text2(e2.operationId, 36, UUID3), body = canonical(topupV2Body(e2.body, s, operationId));
+      if (p) {
+        require2(p.kind === "topup-v2" && p.operationId === operationId && p.canonicalCreateBody === body && p.originalToken === s.active.token, "invalid-transition");
+        return unchanged(s);
+      }
+      return commit(s, { pending: { kind: "topup-v2", operationId, canonicalCreateBody: body, originalToken: s.active.token, stage: "create-pending", created: null } }, "create-topup-v2");
+    }
     if (type === "dispatch-topup") {
       object(event, ["type"]);
       require2(p?.kind === "topup-v1" && p.stage === "prepared", "invalid-transition");
@@ -1239,6 +1314,22 @@ function transitionRecoveryState(stateInput, eventInput) {
       return unchanged(s);
     }
     const e = object(event, ["type", "ticket", "response"]);
+    if (type === "created-topup-v2") {
+      checkTicket(s, e.ticket, "create-topup-v2");
+      require2(p?.kind === "topup-v2");
+      const created = parseCreditsTopupCreatedV2(e.response, { creationId: p.operationId, productId: s.productId, deviceId: s.deviceId, serviceOrigin: s.serviceOrigin });
+      require2(created && isCreditsClaimId(created.binding.claimId));
+      return commit(s, { pending: { ...p, created, stage: "claim-pending" } });
+    }
+    if (type === "status-topup-v2") {
+      checkTicket(s, e.ticket, "status-topup-v2");
+      require2(p?.kind === "topup-v2" && p.created);
+      const response = parseCreditsTopupStatusV2(e.response, { claimId: p.created.binding.claimId, createdAt: p.created.createdAt, expiresAt: p.created.expiresAt });
+      require2(response);
+      if (response.state === "pending" || response.state === "expired" && p.stage === "expired")
+        return unchanged(s);
+      return response.state === "expired" ? commit(s, { pending: { ...p, stage: "expired" } }) : commit(s, { pending: null, generation: nextGeneration(s) });
+    }
     if (type === "created-v2") {
       checkTicket(s, e.ticket, "create-v2");
       require2(p?.kind === "registration-v2");

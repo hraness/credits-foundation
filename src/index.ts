@@ -5,6 +5,9 @@ import {
 } from "./internal.js";
 
 export {
+  CREDITS_TOPUP_CREATE_V2, CREDITS_TOPUP_CREATED_V2,
+  parseCreditsTopupCreateV2, parseCreditsTopupCreatedV2, parseCreditsTopupStatusV2,
+  type CreditsTopupCreateV2, type CreditsTopupCreatedV2, type CreditsTopupStatusV2, type CreditsTopupStatusExpectationV2,
   CREDITS_CLAIM_CREATE_V2, CREDITS_CLAIM_CREATED_V2, CREDITS_PICKUP_REQUEST_V2,
   CREDITS_PICKUP_RESPONSE_V2, CREDITS_BALANCE_V2, CREDITS_V2_MAX_REQUEST_BYTES,
   CREDITS_V2_MAX_RESPONSE_BYTES, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2,
@@ -16,7 +19,7 @@ export {
   type CreditsPickupExpectationV2, type CreditsBalanceV2, type CreditsErrorV2,
 } from "./pickup-v2.js";
 
-export const CREDITS_FOUNDATION_VERSION = "0.3.0";
+export const CREDITS_FOUNDATION_VERSION = "0.4.0";
 export const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export const MICRO_USD_PER_USD = 1_000_000;
 export const MICRO_USD_PER_CREDIT = 10_000;

@@ -103,6 +103,44 @@ describe("server client", () => {
     expect(calls[1]!.body).toEqual({ product: "peopleblade", device: { id: "11111111-1111-4111-8111-111111111111", label: "server" }, email: "reader@example.com", packId: "p25", resume: { argv: ["peopleblade", "enrich"] } });
   });
 
+  test("terminal billing replays preserve the authority result and requested hold identity", async () => {
+    for (const state of ["settled", "released", "expired"] as const) {
+      const balance = { microUsd: 7960000, availableMicroUsd: 7960000 };
+      const settlement = { holdId: "hold_1", state, chargedMicroUsd: state === "settled" ? 140000 : 0, balance, lowBalance: false };
+      const release = { holdId: "hold_1", state, balance };
+      const { client: c, calls } = client(call => ({ status: 200, body: call.url.endsWith("/settle") ? settlement : release }));
+      const settled = await c.settle("hold_1", { units: 2 });
+      const released = await c.release("hold_1");
+      expect(settled).toEqual({ ok: true, value: settlement });
+      expect(released).toEqual({ ok: true, value: release });
+      expect(calls).toHaveLength(2);
+      if (settled.ok) expect(Object.isFrozen(settled.value.balance)).toBe(true);
+      if (released.ok) {
+        expect(Object.isFrozen(released.value)).toBe(true);
+        expect("chargedMicroUsd" in released.value).toBe(false);
+      }
+      const crossed = client(call => ({ status: 200, body: { ...(call.url.endsWith("/settle") ? settlement : release), holdId: "hold_2" } }));
+      expect(await crossed.client.settle("hold_1")).toMatchObject({ ok: false, error: { code: "malformed_response", status: 200 } });
+      expect(await crossed.client.release("hold_1")).toMatchObject({ ok: false, error: { code: "malformed_response", status: 200 } });
+    }
+  });
+
+  test("terminal billing rejects active states and contradictory charges", async () => {
+    const balance = { microUsd: 0, availableMicroUsd: 0 };
+    for (const state of ["held", "pending", "unknown", null]) {
+      const { client: c } = client(call => ({ status: 200, body: { holdId: "hold_1", state, balance,
+        ...(call.url.endsWith("/settle") ? { chargedMicroUsd: 0, lowBalance: false } : {}) } }));
+      expect(await c.settle("hold_1")).toMatchObject({ ok: false, error: { code: "malformed_response" } });
+      expect(await c.release("hold_1")).toMatchObject({ ok: false, error: { code: "malformed_response" } });
+    }
+    for (const state of ["settled", "released", "expired"]) {
+      for (const amount of [-1, 0.5, "0", ...(state === "settled" ? [] : [1])]) {
+        const { client: c } = client(always({ status: 200, body: { holdId: "hold_1", state, balance, chargedMicroUsd: amount, lowBalance: false } }));
+        expect(await c.settle("hold_1")).toMatchObject({ ok: false, error: { code: "malformed_response" } });
+      }
+    }
+  });
+
   test("errors never throw", async () => {
     const notFound = client(always({ status: 404, body: { error: "not_found", message: "No such hold.", holdId: "hold_9" } }));
     expect(await notFound.client.release("hold_9")).toEqual({ ok: false, error: { code: "not_found", status: 404, message: "No such hold.", holdId: "hold_9" } });

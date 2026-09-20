@@ -38,15 +38,18 @@ export interface CreditsSettleInput {
   readonly units?: number;
   readonly costs?: readonly CreditsCost[];
 }
+/** A replay reports the authority's existing terminal state, even when it differs from the requested action. */
+export type CreditsTerminalHoldState = "settled" | "released" | "expired";
 export type CreditsSettlement = Readonly<{
   holdId: string;
-  state: "settled";
+  state: CreditsTerminalHoldState;
   chargedMicroUsd: number;
   balance: CreditsLedgerBalance;
   lowBalance: boolean;
   topup?: Readonly<{ url: string }>;
 }>;
-export type CreditsRelease = Readonly<{ holdId: string; state: "released"; balance: CreditsLedgerBalance }>;
+/** The release wire carries no charge amount; `settled` never implies a refund. */
+export type CreditsRelease = Readonly<{ holdId: string; state: CreditsTerminalHoldState; balance: CreditsLedgerBalance }>;
 export interface CreditsClaimInput {
   readonly product: string;
   readonly device: Readonly<{ id: string; label?: string }>;
@@ -84,25 +87,30 @@ function parseHold(value: unknown): CreditsHold | null {
   return balance === null ? null : Object.freeze({ holdId: value.holdId, ceilingMicroUsd: value.ceilingMicroUsd, balance, expiresAt: value.expiresAt });
 }
 
-function parseSettlement(value: unknown): CreditsSettlement | null {
+function terminalHoldState(value: unknown): value is CreditsTerminalHoldState {
+  return value === "settled" || value === "released" || value === "expired";
+}
+
+function parseSettlement(value: unknown, expectedHoldId: string): CreditsSettlement | null {
   if (!shape(value, ["holdId", "state", "chargedMicroUsd", "balance", "lowBalance"], ["topup"]) || typeof value.holdId !== "string"
-    || !HOLD_ID.test(value.holdId) || value.state !== "settled" || !isMicroUsd(value.chargedMicroUsd) || value.chargedMicroUsd < 0
+    || value.holdId !== expectedHoldId || !terminalHoldState(value.state) || !isMicroUsd(value.chargedMicroUsd) || value.chargedMicroUsd < 0
+    || (value.state !== "settled" && value.chargedMicroUsd !== 0)
     || typeof value.lowBalance !== "boolean"
     || (value.topup !== undefined && (!shape(value.topup, ["url"]) || !safeUrl(value.topup.url)))) return null;
   const balance = parseLedgerBalance(value.balance);
   if (balance === null) return null;
   const topup = value.topup;
   return Object.freeze({
-    holdId: value.holdId, state: "settled", chargedMicroUsd: value.chargedMicroUsd, balance, lowBalance: value.lowBalance,
+    holdId: value.holdId, state: value.state, chargedMicroUsd: value.chargedMicroUsd, balance, lowBalance: value.lowBalance,
     ...(shape(topup, ["url"]) && typeof topup.url === "string" ? { topup: Object.freeze({ url: topup.url }) } : {}),
   });
 }
 
-function parseRelease(value: unknown): CreditsRelease | null {
-  if (!shape(value, ["holdId", "state", "balance"]) || typeof value.holdId !== "string" || !HOLD_ID.test(value.holdId)
-    || value.state !== "released") return null;
+function parseRelease(value: unknown, expectedHoldId: string): CreditsRelease | null {
+  if (!shape(value, ["holdId", "state", "balance"]) || value.holdId !== expectedHoldId
+    || !terminalHoldState(value.state)) return null;
   const balance = parseLedgerBalance(value.balance);
-  return balance === null ? null : Object.freeze({ holdId: value.holdId, state: "released", balance });
+  return balance === null ? null : Object.freeze({ holdId: expectedHoldId, state: value.state, balance });
 }
 
 function parseInsufficient(fields: Readonly<Record<string, unknown>>, message: string | undefined): CreditsInsufficientError | null {
@@ -207,7 +215,7 @@ export function createCreditsClient(options: CreditsClientOptions) {
       });
       return outcome(response, 201, parseHold);
     },
-    /** Charge `min(price, ceiling)` from reported costs or units; retrying a settled hold returns the recorded result. */
+    /** Charge an active hold; terminal replays preserve the recorded settled/released/expired result. */
     async settle(holdId: string, input: CreditsSettleInput = {}): Promise<CreditsClientResult<CreditsSettlement>> {
       if (typeof holdId !== "string" || !HOLD_ID.test(holdId)) return invalid("holdId must be a hold id.");
       if (!record(input)) return invalid("settle input must be an object.");
@@ -219,12 +227,12 @@ export function createCreditsClient(options: CreditsClientOptions) {
         ...(input.units === undefined ? {} : { units: input.units }),
         ...(input.costs === undefined ? {} : { costs: input.costs.map(cost => ({ provider: cost.provider, operation: cost.operation, microUsd: cost.microUsd, basis: cost.basis })) }),
       });
-      return outcome(response, 200, parseSettlement);
+      return outcome(response, 200, value => parseSettlement(value, holdId));
     },
-    /** Release a hold without charging. */
+    /** Release an active hold. A terminal replay may be settled or expired; it does not refund a prior charge. */
     async release(holdId: string): Promise<CreditsClientResult<CreditsRelease>> {
       if (typeof holdId !== "string" || !HOLD_ID.test(holdId)) return invalid("holdId must be a hold id.");
-      return outcome(await post(`/v1/holds/${holdId}/release`, {}), 200, parseRelease);
+      return outcome(await post(`/v1/holds/${holdId}/release`, {}), 200, value => parseRelease(value, holdId));
     },
     /** Balance for a subject token, in the same shape as the CLI status. */
     async balance(subjectToken: string): Promise<CreditsClientResult<CreditsStatus>> {

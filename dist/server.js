@@ -377,7 +377,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.2.0";
+var CREDITS_FOUNDATION_VERSION = "0.2.1";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -956,8 +956,11 @@ function parseHold(value) {
   const balance = parseLedgerBalance(value.balance);
   return balance === null ? null : Object.freeze({ holdId: value.holdId, ceilingMicroUsd: value.ceilingMicroUsd, balance, expiresAt: value.expiresAt });
 }
-function parseSettlement(value) {
-  if (!shape(value, ["holdId", "state", "chargedMicroUsd", "balance", "lowBalance"], ["topup"]) || typeof value.holdId !== "string" || !HOLD_ID.test(value.holdId) || value.state !== "settled" || !isMicroUsd(value.chargedMicroUsd) || value.chargedMicroUsd < 0 || typeof value.lowBalance !== "boolean" || value.topup !== undefined && (!shape(value.topup, ["url"]) || !safeUrl(value.topup.url)))
+function terminalHoldState(value) {
+  return value === "settled" || value === "released" || value === "expired";
+}
+function parseSettlement(value, expectedHoldId) {
+  if (!shape(value, ["holdId", "state", "chargedMicroUsd", "balance", "lowBalance"], ["topup"]) || typeof value.holdId !== "string" || value.holdId !== expectedHoldId || !terminalHoldState(value.state) || !isMicroUsd(value.chargedMicroUsd) || value.chargedMicroUsd < 0 || value.state !== "settled" && value.chargedMicroUsd !== 0 || typeof value.lowBalance !== "boolean" || value.topup !== undefined && (!shape(value.topup, ["url"]) || !safeUrl(value.topup.url)))
     return null;
   const balance = parseLedgerBalance(value.balance);
   if (balance === null)
@@ -965,18 +968,18 @@ function parseSettlement(value) {
   const topup = value.topup;
   return Object.freeze({
     holdId: value.holdId,
-    state: "settled",
+    state: value.state,
     chargedMicroUsd: value.chargedMicroUsd,
     balance,
     lowBalance: value.lowBalance,
     ...shape(topup, ["url"]) && typeof topup.url === "string" ? { topup: Object.freeze({ url: topup.url }) } : {}
   });
 }
-function parseRelease(value) {
-  if (!shape(value, ["holdId", "state", "balance"]) || typeof value.holdId !== "string" || !HOLD_ID.test(value.holdId) || value.state !== "released")
+function parseRelease(value, expectedHoldId) {
+  if (!shape(value, ["holdId", "state", "balance"]) || value.holdId !== expectedHoldId || !terminalHoldState(value.state))
     return null;
   const balance = parseLedgerBalance(value.balance);
-  return balance === null ? null : Object.freeze({ holdId: value.holdId, state: "released", balance });
+  return balance === null ? null : Object.freeze({ holdId: expectedHoldId, state: value.state, balance });
 }
 function parseInsufficient(fields, message) {
   if (!shape(fields, ["required", "balance", "topup"]) || !shape(fields.required, ["microUsd", "usd"], ["credits"]) || !isMicroUsd(fields.required.microUsd) || fields.required.microUsd < 0 || typeof fields.required.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.required.usd) || fields.required.credits !== undefined && !Number.isSafeInteger(fields.required.credits) || !shape(fields.balance, ["microUsd", "usd", "availableMicroUsd"], ["credits"]) || !isMicroUsd(fields.balance.microUsd) || typeof fields.balance.usd !== "string" || !/^-?\d{1,10}\.\d{2}$/u.test(fields.balance.usd) || fields.balance.credits !== undefined && !Number.isSafeInteger(fields.balance.credits) || !isMicroUsd(fields.balance.availableMicroUsd) || !shape(fields.topup, ["claimId", "url", "expiresAt", "packs", "suggestedPackId"]) || !isCreditsClaimId(fields.topup.claimId) || !safeUrl(fields.topup.url) || !timestamp(fields.topup.expiresAt) || !isCreditsPackId(fields.topup.suggestedPackId) || !Array.isArray(fields.topup.packs) || fields.topup.packs.length < 1 || fields.topup.packs.length > 16)
@@ -1094,12 +1097,12 @@ function createCreditsClient(options) {
         ...input.units === undefined ? {} : { units: input.units },
         ...input.costs === undefined ? {} : { costs: input.costs.map((cost) => ({ provider: cost.provider, operation: cost.operation, microUsd: cost.microUsd, basis: cost.basis })) }
       });
-      return outcome(response, 200, parseSettlement);
+      return outcome(response, 200, (value) => parseSettlement(value, holdId));
     },
     async release(holdId) {
       if (typeof holdId !== "string" || !HOLD_ID.test(holdId))
         return invalid("holdId must be a hold id.");
-      return outcome(await post(`/v1/holds/${holdId}/release`, {}), 200, parseRelease);
+      return outcome(await post(`/v1/holds/${holdId}/release`, {}), 200, (value) => parseRelease(value, holdId));
     },
     async balance(subjectToken) {
       if (!isCreditsDeviceToken(subjectToken))

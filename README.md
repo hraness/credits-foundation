@@ -183,12 +183,21 @@ if (!hold.ok) {
   return failure(hold.error);                                                // { code, status, message?, ...fields }
 }
 // do the work, then
-await credits.settle(hold.value.holdId, { units: 3 });   // or costs: [{ provider, operation, microUsd, basis }]
+const settlement = await credits.settle(hold.value.holdId, { units: 3 }); // or costs: [{ provider, operation, microUsd, basis }]
+// Inspect settlement.ok and settlement.value.state before recording a charge.
 ```
 
 `hold`, `settle`, `release`, `balance` (`POST /v1/subjects/balance`) and
 `claim` (`POST /v1/claims` on behalf of a subject) return `{ ok: true, value }`
-or `{ ok: false, error }` and never throw on HTTP errors; invalid input returns
+or `{ ok: false, error }` and never throw on HTTP errors. Successful settle and
+release responses preserve the authority's actual terminal state: `settled`,
+`released`, or `expired`. `ok: true` means the response is valid; it does not
+mean the requested action changed an already terminal hold. Settlement retains
+the recorded `chargedMicroUsd`; released/expired settlements charge zero. The
+release wire supplies no charged amount, so a replay reporting `settled` neither
+proves a zero charge nor refunds it. Responses for another hold are rejected.
+Retain an unresolved billing intent for reconciliation when the observed state
+differs from the intended one. Invalid input returns
 `invalid_request` with status `0` before any request, and an unreachable
 service returns `unreachable`. Every response is parsed from `unknown` against
 the contract; anything else is `malformed_response`. `ceilingFor(rateCard,

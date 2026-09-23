@@ -1,22 +1,24 @@
-# Hraness credits foundation
+# @hraness/credits-foundation
 
-`@hraness/credits-foundation` is the shared library through which Hraness
-products meter paid work against prepaid credits. It fixes the vocabulary a
-product, its command line, its backend, and the agents driving it use to talk
-about money and payment: an integer micro-USD ledger with one credit equal to
-one cent, versioned JSON shapes for balances, claims, rate cards and estimates,
-one fixed envelope a metered command prints when it cannot proceed, and typed
-clients for the credits service. With it a product can refuse work it cannot
-charge for, tell a person or an agent exactly what the work costs and where to
-pay, and resume once the payment lands.
+`@hraness/credits-foundation` lets a Hraness product charge prepaid credits for
+paid work. When the balance is too low for a command, the command stops and
+tells the person or agent how many credits it needs and where to pay. After
+payment, the product's `credits wait` command or a rerun of the original
+command resumes the work.
 
-The package holds no ledger. The credits service owns balances, prices, packs
+A product's CLI, its backend, and the agents that drive it all use the same
+money types from this package. Amounts are integer micro-USD, and one credit is
+one cent. The package also defines versioned JSON shapes for balances, claims,
+rate cards, and estimates; the one fixed message a metered command prints when
+it cannot proceed; and typed clients for the credits service.
+
+The package holds no ledger. The credits service owns balances, prices, packs,
 and checkout; this library parses what the service says and presents it. It
-never enters card details, never opens a browser, and never sends email itself.
+does not enter card details, open a browser, or send email itself.
 
-## Why it exists
+## What it provides
 
-- **One money vocabulary.** Every amount is an integer number of micro-USD;
+- Money helpers. Every amount is an integer number of micro-USD;
   `credits` is that amount in whole cents and `usd` is the same cents as a
   two-decimal string, so agents read both and people see dollars. The pure
   helpers (`creditsFromMicroUsd`, `formatUsd`, `microUsdFromUsd`, `priceUnit`,
@@ -24,19 +26,19 @@ never enters card details, never opens a browser, and never sends email itself.
   and throw a `RangeError` beyond one billion dollars instead of drifting.
   They mirror the service's formulas for tests and local pre-checks; the
   service's answer is the price.
-- **One payment handoff.** `buildCreditsRequiredEnvelope` produces the exact
+- The payment message. `buildCreditsRequiredEnvelope` produces the exact
   `hraness-credits-required-v1` line, with a fixed instruction sentence, and
   `renderCreditsRequiredForHuman` turns it into four lines for a terminal. The
   parser accepts only that sentence, so an envelope cannot carry other
   instructions to an agent. The envelope is guidance for cooperating agents;
   it cannot force one to behave.
-- **A device that remembers its purchase.** The Node adapter keeps one small
+- Device state. The Node adapter keeps one small
   state file per product: a device ID, the pending topup link, a five-minute
   rate-card cache, and the device token the service issues once when a
   purchase started from this device is paid. Products attach that token to
   their own metered requests. State is per device and per product; nothing
   synchronizes it elsewhere.
-- **Opaque pricing.** Rate cards carry packs and public unit prices only.
+- Public prices only. Rate cards carry packs and public unit prices only.
   Operations priced from actual usage expose no price before settlement, and
   `estimate` says so with `known: false`.
 
@@ -92,44 +94,6 @@ Not at this terminal? Email the link: peopleblade credits email --to <address>
 form through a bounded write that never throws, so a closed pipe cannot change
 the product's exit code. The product still exits with its own failure code and,
 in its own `--json` envelope, sets `error.code` to `credits_required`.
-
-## Parse the v2 recovery wire
-
-The root entry exports pure parsers for v2 claim creation, credential pickup,
-acknowledgement and balance responses. Pass the identity saved by the caller
-and its configured service origin; malformed, contradictory or mismatched
-responses return `null`. Accepted values are deeply frozen copies.
-
-These exports support an inactive protocol. They do not add v2 commands,
-transport or durable credential recovery, and do not enable the authority's
-v2 endpoints. Existing CLI commands below continue to use v1. See the
-[v2 wire reference](docs/pickup-v2.md) for the exact caller bindings, limits
-and compatibility boundary.
-
-## Retain a recoverable credential handoff
-
-`@hraness/credits-foundation/recovery` exports the pure recovery state model.
-It binds a saved creation request, candidate credential and pickup operation
-before a caller dispatches them, then accepts only responses for that identity.
-The optional `@hraness/credits-foundation/recovery/bun` entry stores those
-transitions with a SQLite transaction and a revision/generation check.
-
-The store is initially qualified only for Bun 1.3.14 on macOS arm64 with APFS
-and its pinned SQLite runtime. Other environments return `unsupported-runtime`
-or `unsupported-filesystem`. Ordinary Node imports select a no-I/O stub without
-loading `bun:sqlite`; the root and pure recovery entries remain browser safe.
-Importing an entry neither migrates state nor calls the credits service.
-
-Adoption is an explicit operation. It preserves an eligible legacy identity,
-fences older writers, and refuses a pending once-only legacy claim secret.
-A returned storage error may follow a committed transition: read the same
-store to reconcile it. Never invent a new identity to recover an uncertain
-write. See the [state contract](docs/recovery-state.md) and
-[storage contract](docs/recovery-sqlite.md) for bootstrap, concurrency and
-interruption behavior. Process-death tests do not establish power-loss safety.
-
-These APIs provide local recovery primitives. Existing `./node` commands still
-use v1; no transport, provider dispatch or paid endpoint is activated.
 
 ## Connect a CLI
 
@@ -230,6 +194,58 @@ operation, units)` mirrors the service's public unit pricing so a backend can
 pre-check a request locally; it returns `null` for operations without a public
 unit price. A `402` maps directly onto `buildCreditsRequiredEnvelope`.
 
+## Not yet active: v2 recovery
+
+The package also contains parsers and a local state model for a v2 recovery
+protocol that is not active yet. Nothing in this section is wired into a
+command or a network transport: the CLI commands above still use v1, nothing
+here sends a request to a provider or a paid endpoint, and the package does not
+turn on the credits service's v2 endpoints. In the documents linked below,
+“the authority” means the credits service.
+
+### Response parsers
+
+The root entry exports pure parsers for v2 claim creation, credential pickup,
+acknowledgement, and balance responses. Pass the identity saved by the caller
+and its configured service origin; malformed, contradictory, or mismatched
+responses return `null`. Accepted values are deeply frozen copies. The
+[v2 wire reference](docs/pickup-v2.md) lists what each parser needs from the
+caller, its limits, and how it relates to v1.
+
+`parseCreditsTopupCreateV2`, `parseCreditsTopupCreatedV2`, and
+`parseCreditsTopupStatusV2` cover top-ups from a device that already holds a
+credential.
+
+### Recovery state
+
+`@hraness/credits-foundation/recovery` exports the pure recovery state model.
+It binds a saved creation request, candidate credential, and pickup operation
+before a caller sends them, then accepts only responses for that identity. A
+separate `topup-v2` state saves one canonical creation request and the device's
+existing credential before a top-up request goes out, so a future transport can
+recover the same payment link after a lost reply. A payment that arrives late
+clears only that pending purchase; it does not issue or rotate a token.
+
+The optional `@hraness/credits-foundation/recovery/bun` entry stores those
+transitions with a SQLite transaction and a revision and generation check. For
+now it runs only on Bun 1.3.14 on macOS arm64 with APFS and its pinned SQLite
+runtime. Anywhere else it returns `unsupported-runtime` or
+`unsupported-filesystem`. A plain Node import gets a stub that does no I/O and
+never loads `bun:sqlite`, and the root and pure recovery entries still work in
+browsers. Importing an entry neither migrates state nor calls the credits
+service. Older readers reject a pending kind they do not recognize without
+resetting it.
+
+Moving existing v1 state into the store is an explicit call. It keeps an
+eligible v1 device identity, keeps older versions from writing to the migrated
+state, and refuses a pending v1 claim that still holds its once-only secret. A
+storage error can arrive after the change was committed, so read the same
+store to see what happened, and never create a new identity to recover from an
+uncertain write. The [state contract](docs/recovery-state.md) and
+[storage contract](docs/recovery-sqlite.md) cover setup, concurrency, and
+interruption. The tests kill processes mid-write; they do not show that the
+store survives power loss.
+
 ## Agent behavior
 
 `<product> credits protocol --json` returns `hraness-credits-protocol-v1`: the
@@ -283,9 +299,3 @@ runtime dependencies. No test touches real user state or the network.
   follows, with the sentences it should and should not say.
 - Generated declarations in `dist/*.d.ts` are the public type surface.
 - [AGENTS.md](AGENTS.md) records the rules for changing this repository.
-
-### Replayable returning top-ups
-
-Version 0.4.0 adds pure `parseCreditsTopupCreateV2`, `parseCreditsTopupCreatedV2` and `parseCreditsTopupStatusV2` exports, plus a distinct `topup-v2` recovery state. It retains one canonical creation request and the existing device credential before dispatch, so a future transport can recover the same link after a lost reply. Late paid status clears only that pending purchase; it does not issue or rotate a token.
-
-The optional Bun store uses its existing schema and guards. Older readers reject an unfamiliar pending kind without resetting it. Existing v1 commands, uncertain v1 creation and status-only legacy migration retain their behavior. This release adds no active transport or CLI wiring and does not enable the source-disabled authority. See [recovery semantics](./docs/recovery-state.md) and [wire contracts](./docs/pickup-v2.md).

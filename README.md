@@ -1,9 +1,10 @@
 # @hraness/credits-foundation
 
 `@hraness/credits-foundation` lets a Hraness product charge prepaid credits for
-paid work. When a command costs more than the balance, the product refuses the
-work, tells the person or agent exactly what it costs and where to pay, and
-resumes once the payment lands.
+paid work. When the balance is too low for a command, the command stops and
+tells the person or agent how many credits it needs and where to pay. After
+payment, the product's `credits wait` command or a rerun of the original
+command resumes the work.
 
 A product's CLI, its backend, and the agents that drive it all use the same
 money types from this package. Amounts are integer micro-USD, and one credit is

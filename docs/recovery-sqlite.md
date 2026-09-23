@@ -2,7 +2,7 @@
 
 `src/recovery-sqlite.ts` is the runtime storage adapter for the separate pure [recovery state model](./recovery-state.md). It is not connected to a credits command, network transport or hosted product. Importing the module does not create state, open a database, inspect the filesystem or generate credentials. Calling its explicit APIs can change local state. The module imports `bun:sqlite`; portable root, Node command and server entries must remain independent of it.
 
-The initial runtime profile is deliberately narrow: Bun1.3.14, macOS arm64, APFS filesystem type26, and the recorded Apple SQLite3.51.0 source identity. Every operation verifies that profile before state access. Unknown runtime or filesystem identities fail closed. Passing this source's offline tests does not enable an authority endpoint, qualify a different host profile or authorize a paid request.
+The initial runtime profile is deliberately narrow: Bun 1.3.14, macOS arm64, APFS filesystem type 26, and the recorded Apple SQLite 3.51.0 source identity. Every operation verifies that profile before state access. Unknown runtime or filesystem identities fail closed. Passing this source's offline tests does not enable an authority endpoint, qualify a different host profile or authorize a paid request.
 
 ## Four synchronous operations
 
@@ -31,7 +31,7 @@ The qualified connection settings are DELETE journal mode, synchronousEXTRA, mac
 
 The trusted base must be owned by the current user or root and not group/other writable. Application-owned directories require the current UID and exact0700. DB, marker, lock and rollback journal files require the current UID, exact0600, a regular file and a single hard link on the same device. Existing unsafe entries fail; they are never chmodded into apparent safety. Bootstrap creates missing application directories individually and syncs each new directory and its parent. The caller may resolve a documented OS base alias first; this API requires the canonical path itself.
 
-SQLite uses READWRITE|NOFOLLOW without CREATE after an exclusive0600 precreation during bootstrap. The raw creation descriptor closes before SQLite opens the DB. Metadata checks use lstat: no raw descriptor for the database is opened, read, copied or closed while the adapter's SQLite connection is live. This matters because closing another raw descriptor can release POSIX locks held by SQLite. [SQLite corruption hazards](https://www.sqlite.org/howtocorrupt.html).
+SQLite uses READWRITE|NOFOLLOW without CREATE after an exclusive 0600 precreation during bootstrap. The raw creation descriptor closes before SQLite opens the DB. Metadata checks use lstat: no raw descriptor for the database is opened, read, copied or closed while the adapter's SQLite connection is live. This matters because closing another raw descriptor can release POSIX locks held by SQLite. [SQLite corruption hazards](https://www.sqlite.org/howtocorrupt.html).
 
 WAL/SHM files are refused. A safe rollback journal is preserved for SQLite's normal recovery, including on a read call. Directory and DB identities are checked before and after access; marker identity is bound to the database UUID before an action can return. These checks protect against unsafe preexisting paths and accidental replacement under a cooperating-process model. They do not claim isolation from malicious code running as the same OS user.
 
@@ -43,7 +43,7 @@ Bootstrap acquires the existing exact `<product>.lock` with exclusive creation b
 
 An original legacy claim containing any `secret` field is refused unchanged. An old v1 wait may already have released its lock while awaiting a consuming paid response, so probing that route or trying to migrate its token would be unsafe. Token-only state and token-bound pending claims without a secret can migrate; the exact device, token and pending claim survive. Original UTF-8 bytes are validated, including duplicate-key rejection, and retained with their SHA256 only in the prepared row.
 
-After the prepared row commits, bootstrap rereads the exact legacy bytes or absence while retaining the lock. It writes the nonsecret marker through an exclusive0600 temporary file, fsyncs it, renames it over the legacy path and fsyncs the directory. It then reads and syncs the marker again before a separate activation transaction. Activation updates the state and removes both original legacy bytes and fingerprint in one transaction. No duplicate secret JSON backup is created.
+After the prepared row commits, bootstrap rereads the exact legacy bytes or absence while retaining the lock. It writes the nonsecret marker through an exclusive 0600 temporary file, fsyncs it, renames it over the legacy path and fsyncs the directory. It then reads and syncs the marker again before a separate activation transaction. Activation updates the state and removes both original legacy bytes and fingerprint in one transaction. No duplicate secret JSON backup is created.
 
 | Observed state | Recovery |
 | --- | --- |

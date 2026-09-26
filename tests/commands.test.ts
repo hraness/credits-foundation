@@ -226,7 +226,7 @@ describe("email", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('{"sentTo":"reader@example.com"}\n');
     expect(result.stderr).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
-    const person = await runCreditsCommand(profile, ["email", "--to", "reader@example.com"], { ...h.io, audience: "human" });
+    const person = await runCreditsCommand(profile, ["email", "--to", "reader@example.com"], { ...h.io, audience: "human", stdout: { isTTY: true, write: () => true } });
     expect(person.stdout).toBe("");
     expect(person.stderr).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
     expect(h.calls[0]!.headers.authorization).toBe(`Bearer ${CLAIM_SECRET}`);

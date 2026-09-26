@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   buildCreditsRequiredEnvelope, creditsMenuItems, formatValidity, humanizeOperation, parseCreditsStatus,
@@ -44,6 +44,19 @@ describe("detectCreditsAudience", () => {
 });
 
 describe("credits help", () => {
+  test("help flags anywhere print help; agents and --json get the protocol instead", async () => {
+    const h = await setup();
+    const withJson = await runCreditsCommand(profile, ["--help", "--json"], h.io);
+    expect(withJson.exitCode).toBe(0);
+    expect(JSON.parse(withJson.stdout).schemaVersion).toBeDefined();
+    const agent = await runCreditsCommand(profile, [], { ...h.io, audience: "agent" });
+    expect(agent.exitCode).toBe(0);
+    expect(JSON.parse(agent.stdout)).toEqual(JSON.parse(withJson.stdout));
+    const late = await runCreditsCommand(profile, ["topup", "--help"], { ...h.io, audience: "human" });
+    expect(late.exitCode).toBe(0);
+    expect(late.stdout).toStartWith("Usage: peopleblade credits <command> [options]\n");
+  });
+
   test("--help, -h, help and a bare call print grouped help to stdout and exit 0", async () => {
     const h = await setup();
     const outputs = await Promise.all([["--help"], ["-h"], ["help"], []].map(argv => runCreditsCommand(profile, argv, h.io)));
@@ -94,13 +107,32 @@ describe("audience and terminals", () => {
     expect(JSON.parse(failure.stdout)).toMatchObject({ error: "usage_error" });
   });
 
-  test("signout and email keep JSON for scripts but never show it to a person", async () => {
+  test("signout and email keep JSON for scripts and captures but not on a person's terminal", async () => {
     const h = await setup();
+    const sink = (isTTY: boolean) => ({ isTTY, write: () => true });
     await signIn(h);
-    const person = await runCreditsCommand(profile, ["signout"], { ...h.io, audience: "human" });
+    const person = await runCreditsCommand(profile, ["signout"], { ...h.io, audience: "human", stdout: sink(true) });
     expect(person.stdout).toBe("");
+    await signIn(h);
+    // A person capturing stdout, as in out=$(peopleblade credits signout), still gets JSON.
+    const captured = await runCreditsCommand(profile, ["signout"], { ...h.io, audience: "human", stdout: sink(false) });
+    expect(captured.stdout).toBe('{"signedOut":true}\n');
     const pipe = await runCreditsCommand(profile, ["signout"], h.io);
     expect(pipe.stdout).toBe('{"signedOut":true}\n');
+  });
+
+  test("a lock left by a stopped command says how to clear it; a fresh one says wait", async () => {
+    const h = await setup();
+    await mkdir(dirname(h.lockFile), { recursive: true });
+    await writeFile(h.lockFile, "");
+    const fresh = await runCreditsCommand(profile, ["status"], { ...h.io, audience: "human" });
+    expect(fresh.stderr).toBe("✗ Another PeopleBlade credits command is running. Try again in a moment.\n");
+    const old = new Date(Date.now() - 10 * 60_000);
+    await utimes(h.lockFile, old, old);
+    const stale = await runCreditsCommand(profile, ["status"], { ...h.io, audience: "human" });
+    expect(stale.stderr).toBe(`✗ PeopleBlade credits are locked by a command that stopped. If no credits command is running, remove ${h.lockFile} and try again.\n`);
+    const json = await runCreditsCommand(profile, ["status", "--json"], h.io);
+    expect(JSON.parse(json.stdout)).toMatchObject({ error: "busy", lockFile: h.lockFile, stale: true });
   });
 
   test("NO_COLOR changes nothing because the output has no color; plain terminals get ASCII", async () => {

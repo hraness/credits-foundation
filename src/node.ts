@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
@@ -332,11 +332,27 @@ async function withStateRetrying<T>(
   return result;
 }
 
-function stateFailure(context: Context, reason: "busy" | "state-unavailable"): Failure {
+/** Credits commands hold the lock for seconds; an older lock was left by a command that stopped. */
+const STALE_LOCK_MS = 5 * 60_000;
+
+async function stateFailure(context: Context, reason: "busy" | "state-unavailable"): Promise<Failure> {
   const directory = creditsStateDirectory(context.io);
-  return reason === "busy"
-    ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command is running. Try again in a moment.`, fields: { lockFile: join(directory, `${context.profile.id}.lock`) } }
-    : { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
+  if (reason === "busy") {
+    const lockFile = join(directory, `${context.profile.id}.lock`);
+    const modified = await lstat(lockFile).then(stat => stat.mtimeMs, () => undefined);
+    // Never remove the lock automatically; say how only when it is clearly left over.
+    // File times are wall-clock, so compare with the wall clock, not the injected one.
+    const leftover = modified !== undefined && Date.now() - modified > STALE_LOCK_MS;
+    return {
+      code: "busy",
+      exitCode: 1,
+      message: leftover
+        ? `${context.profile.name} credits are locked by a command that stopped. If no credits command is running, remove ${lockFile} and try again.`
+        : `Another ${context.profile.name} credits command is running. Try again in a moment.`,
+      fields: { lockFile, ...(leftover ? { stale: true } : {}) },
+    };
+  }
+  return { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
 }
 
 /** Read the device token a product attaches as `Authorization: Bearer` to its own metered requests. */
@@ -876,8 +892,12 @@ async function signoutCommand(context: Context, rest: readonly string[]): Promis
 
 async function dispatch(context: Context, argv: readonly string[]): Promise<Outcome> {
   const [command, ...rest] = argv;
-  if (command === undefined || (argv.length === 1 && (command === "-h" || command === "--help" || command === "help"))) {
-    return { exitCode: 0, json: null, human: "", help: helpText(context) };
+  const helpWords = new Set(["-h", "--help", "help"]);
+  if (command === undefined || helpWords.has(command) || argv.includes("-h") || argv.includes("--help")) {
+    // Agents and --json get the machine-readable protocol; people get grouped help.
+    return context.json
+      ? { exitCode: 0, json: creditsProtocol(context.profile), human: "" }
+      : { exitCode: 0, json: null, human: "", help: helpText(context) };
   }
   switch (command) {
     case "protocol":
@@ -954,8 +974,9 @@ export async function runCreditsCommand(
   } else if (outcome.help !== undefined) {
     await emitter.out(outcome.help);
   } else {
-    // `email` and `signout` keep JSON on stdout for scripts, but never for a person at a terminal.
-    if (wantsJson || (outcome.jsonAlways === true && audience !== "human")) await emitter.out(json(outcome.json));
+    // `email` and `signout` keep JSON on stdout for scripts and captures, but not on a person's terminal.
+    const stdoutIsTerminal = (io.stdout === undefined ? process.stdout.isTTY : io.stdout.isTTY) === true;
+    if (wantsJson || (outcome.jsonAlways === true && !(audience === "human" && stdoutIsTerminal))) await emitter.out(json(outcome.json));
     if (!wantsJson && outcome.human !== "") await emitter.err(symbols(outcome.human, env));
     if (!wantsJson && audience === "human" && outcome.next !== undefined) await emitter.err(`Next: ${outcome.next}\n`);
   }

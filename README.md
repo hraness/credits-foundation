@@ -127,17 +127,18 @@ shell text; every command array the package prints starts with it. When
 the same text either way. JSON and help go to stdout, human text to stderr.
 
 The same audience rule applies (or pass `audience` in `io`). A detected agent
-gets JSON without `--json`. A person at a terminal gets text only, including
-from `email` and `signout`, which otherwise print their JSON for scripts, plus
-one `Next:` hint after `wait`. Errors read `✗ what happened` with `→ … credits
+gets JSON without `--json`. People get text on stderr; `email` and `signout`
+also print their JSON to stdout unless stdout is a person's terminal, so
+`out=$(… credits signout)` still captures it. `wait` adds one `Next:` hint. Errors read `✗ what happened` with `→ … credits
 --help` for usage mistakes. Symbols fall back to ASCII (`OK`, `FAIL`, `->`)
 when `TERM=dumb`, the locale is not UTF-8, or `HRANESS_ASCII=1`. No output is
-colored. `credits`, `credits help`, `-h` and `--help` print grouped help and
-exit 0.
+colored. `credits`, `credits help`, and `-h` or `--help` anywhere print
+grouped help and exit 0; with `--json` or for a detected agent they print the
+protocol JSON instead.
 
 | Arguments after `credits` | Effect | stdout |
 | --- | --- | --- |
-| (none), `help`, `-h`, `--help` | Print grouped help for people. Pure. | help text |
+| (none), `help`, `-h`, `--help` | Print grouped help for people, or the protocol JSON with `--json` or for an agent. Pure. | help text or `hraness-credits-protocol-v1` |
 | `protocol --json` | Describe commands and lifecycle. Pure. | `hraness-credits-protocol-v1` |
 | `status [--json]` | Read the balance for the stored device token; without a token, report `signedOut: true` and the topup command. Network only with a token. | `hraness-credits-status-v1` |
 | `topup [--usd N \| --pack id] [--email addr] [--json]` | Create a claim, bound to the stored token when one exists, and print the link. `--usd` picks the pack with that price from the rate card. Network. | `hraness-credits-claim-v1` without `claimSecret` |
@@ -171,8 +172,10 @@ The file (`hraness-credits-state-v1`) holds the product ID, a random device
 UUID, the device token when one was issued, the pending claim with its secret,
 and the cached rate card. Writes go to a temporary file, are fsynced and
 renamed into place; reads refuse symlinks and anything over 16 KiB. A
-nonblocking `<productId>.lock` serializes commands; a lock left by a crashed
-process is never stolen, so the busy message names it. Malformed state is left
+nonblocking `<productId>.lock` serializes commands. A lock is never stolen:
+the busy message says to try again, and once the lock is over five minutes
+old it names the file and says to remove it if no credits command is running
+(`--json` always includes `lockFile`, plus `stale: true` then). Malformed state is left
 untouched and reported as unavailable, never reset.
 
 Commands never print device tokens or claim secrets. The one exception is a

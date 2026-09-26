@@ -939,7 +939,7 @@ function creditsMenuItems(status, options = {}) {
 // src/node.ts
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -1234,9 +1234,23 @@ async function withStateRetrying(context, action) {
   }
   return result;
 }
-function stateFailure(context, reason) {
+var STALE_LOCK_MS = 5 * 60000;
+async function stateFailure(context, reason) {
   const directory = creditsStateDirectory(context.io);
-  return reason === "busy" ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command is running. Try again in a moment.`, fields: { lockFile: join(directory, `${context.profile.id}.lock`) } } : { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
+  if (reason === "busy") {
+    const lockFile = join(directory, `${context.profile.id}.lock`);
+    const modified = await lstat(lockFile).then((stat) => stat.mtimeMs, () => {
+      return;
+    });
+    const leftover = modified !== undefined && Date.now() - modified > STALE_LOCK_MS;
+    return {
+      code: "busy",
+      exitCode: 1,
+      message: leftover ? `${context.profile.name} credits are locked by a command that stopped. If no credits command is running, remove ${lockFile} and try again.` : `Another ${context.profile.name} credits command is running. Try again in a moment.`,
+      fields: { lockFile, ...leftover ? { stale: true } : {} }
+    };
+  }
+  return { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
 }
 async function readStoredDeviceToken(profile, options = {}) {
   try {
@@ -1806,8 +1820,9 @@ async function signoutCommand(context, rest) {
 }
 async function dispatch(context, argv) {
   const [command, ...rest] = argv;
-  if (command === undefined || argv.length === 1 && (command === "-h" || command === "--help" || command === "help")) {
-    return { exitCode: 0, json: null, human: "", help: helpText(context) };
+  const helpWords = new Set(["-h", "--help", "help"]);
+  if (command === undefined || helpWords.has(command) || argv.includes("-h") || argv.includes("--help")) {
+    return context.json ? { exitCode: 0, json: creditsProtocol(context.profile), human: "" } : { exitCode: 0, json: null, human: "", help: helpText(context) };
   }
   switch (command) {
     case "protocol":
@@ -1883,7 +1898,8 @@ async function runCreditsCommand(profile, argv = [], io = {}) {
   } else if (outcome.help !== undefined) {
     await emitter.out(outcome.help);
   } else {
-    if (wantsJson || outcome.jsonAlways === true && audience !== "human")
+    const stdoutIsTerminal = (io.stdout === undefined ? process.stdout.isTTY : io.stdout.isTTY) === true;
+    if (wantsJson || outcome.jsonAlways === true && !(audience === "human" && stdoutIsTerminal))
       await emitter.out(json(outcome.json));
     if (!wantsJson && outcome.human !== "")
       await emitter.err(symbols(outcome.human, env));

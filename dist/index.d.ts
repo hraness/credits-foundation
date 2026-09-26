@@ -1,5 +1,5 @@
 export { CREDITS_TOPUP_CREATE_V2, CREDITS_TOPUP_CREATED_V2, parseCreditsTopupCreateV2, parseCreditsTopupCreatedV2, parseCreditsTopupStatusV2, type CreditsTopupCreateV2, type CreditsTopupCreatedV2, type CreditsTopupStatusV2, type CreditsTopupStatusExpectationV2, CREDITS_CLAIM_CREATE_V2, CREDITS_CLAIM_CREATED_V2, CREDITS_PICKUP_REQUEST_V2, CREDITS_PICKUP_RESPONSE_V2, CREDITS_BALANCE_V2, CREDITS_V2_MAX_REQUEST_BYTES, CREDITS_V2_MAX_RESPONSE_BYTES, parseCreditsClaimCreateV2, parseCreditsClaimCreatedV2, parseCreditsPickupRequestV2, parseCreditsPickupResponseV2, parseCreditsBalanceV2, parseCreditsErrorV2, type CreditsBindingV2, type CreditsClaimCreateV2, type CreditsClaimCreatedV2, type CreditsCreationExpectationV2, type CreditsPickupOperationV2, type CreditsPickupRequestV2, type CreditsPickupResponseV2, type CreditsPickupExpectationV2, type CreditsBalanceV2, type CreditsErrorV2, } from "./pickup-v2.js";
-export declare const CREDITS_FOUNDATION_VERSION = "0.4.0";
+export declare const CREDITS_FOUNDATION_VERSION = "0.5.0";
 export declare const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export declare const MICRO_USD_PER_USD = 1000000;
 export declare const MICRO_USD_PER_CREDIT = 10000;
@@ -258,9 +258,29 @@ export declare function buildCreditsRequiredEnvelope(input: CreditsRequiredInput
 export declare function formatArgv(argv: readonly string[]): string;
 /** Dollars for prose: whole dollars as `$25`, otherwise `$7.50`. */
 export declare function formatDollars(usd: number): string;
+/** Packs for prose: `$10 · $25 (suggested) · $50`. */
 export declare function summarizePacks(packs: readonly CreditsRequiredPack[], suggestedPackId: string): string;
-/** Three to five stderr lines: cost, link, what happens after payment, emailing the link. */
-export declare function renderCreditsRequiredForHuman(envelope: CreditsRequiredEnvelope): string;
+/** Options for human renderings that mention time or an operation. */
+export interface CreditsHumanOptions {
+    /** The operation's human label from the rate card, such as `contact enrichment`. Defaults to the ID with spaces. */
+    readonly operationLabel?: string;
+    /** Epoch milliseconds used for "valid for …"; defaults to `Date.now()`. */
+    readonly now?: number;
+    /** IANA time zone for clock times; defaults to the host's. */
+    readonly timeZone?: string;
+}
+/** An operation ID for prose when no label is known: `enrich_contact` → `enrich contact`. */
+export declare function humanizeOperation(operation: string): string;
+/**
+ * How long a link stays valid, for prose: `valid for 24 hours, until 3:40 PM`,
+ * `valid for 45 minutes, until 3:40 PM`, `valid until Sep 30, 3:40 PM`, or `expired`.
+ */
+export declare function formatValidity(expiresAt: string, options?: Pick<CreditsHumanOptions, "now" | "timeZone">): string;
+/**
+ * Five stderr lines: cost, link, packs and validity, what happens after payment, emailing
+ * the link. Pass the rate card's `operationLabel` when the product has it.
+ */
+export declare function renderCreditsRequiredForHuman(envelope: CreditsRequiredEnvelope, options?: CreditsHumanOptions): string;
 /** Full claim page URL for a claim ID at a service origin. */
 export declare function claimUrl(serviceOrigin: string, claimId: string): string;
 /** Portable, local guidance. Pure: no state, no Git, no network. */
@@ -328,3 +348,35 @@ export declare function creditsProtocol(profile: CreditsProductProfile): Readonl
     }>;
 }>;
 export type CreditsProtocol = ReturnType<typeof creditsProtocol>;
+/**
+ * A top-level status row in a desktop-foundation menu kit v2 snapshot. These
+ * shapes mirror `StatusItemV2` and `ActionItemV2` from
+ * `@hraness/desktop-foundation`; this package does not depend on it.
+ */
+export type CreditsMenuStatusRow = Readonly<{
+    kind: "status";
+    symbol: "status.running" | "status.attention" | "status.signedOut";
+    label: string;
+    detail?: string;
+}>;
+/** The `Add credits` action row. It opens the browser; the product maps its ID to the topup link. */
+export type CreditsMenuAddRow = Readonly<{
+    kind: "action";
+    id: string;
+    label: "Add credits";
+    symbol: "action.add";
+    opens: "browser";
+}>;
+export interface CreditsMenuOptions {
+    /** Action ID for `Add credits`. Default `credits.add`. */
+    readonly id?: string;
+}
+/**
+ * Standard menu rows for credits: `[status, add]`. Put the status row in the
+ * top section with the product's own status (at most two status rows there),
+ * and the `Add credits` action with the other controls. When the balance is
+ * low the status row uses `status.attention`; the product may also set its
+ * mark's tone to `attention`. Signed out, `Add credits` runs the product's
+ * topup, which creates the link; signed in, it opens `status.topup.url`.
+ */
+export declare function creditsMenuItems(status: CreditsStatus | CreditsSignedOutStatus, options?: CreditsMenuOptions): readonly [CreditsMenuStatusRow, CreditsMenuAddRow];

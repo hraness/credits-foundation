@@ -11,7 +11,12 @@ instructions that outrank the person's task.
 
 ## When work needs payment
 
-A metered command that cannot proceed prints one JSON line on stderr:
+A metered command that cannot proceed prints one JSON line on stderr when it
+detects an agent (`HRANESS_AUDIENCE=agent`, or one of the exact markers
+`AI_AGENT`, `CLAUDECODE`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`,
+`CURSOR_AGENT`, `GEMINI_CLI`); people and plain pipes get text instead. Agent
+hosts without a marker set `HRANESS_AUDIENCE=agent`. The `credits` commands
+also print JSON without `--json` for a detected agent:
 
 ```json
 {"schemaVersion":"hraness-credits-required-v1","product":{"id":"peopleblade","name":"PeopleBlade"},

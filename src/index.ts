@@ -19,7 +19,7 @@ export {
   type CreditsPickupExpectationV2, type CreditsBalanceV2, type CreditsErrorV2,
 } from "./pickup-v2.js";
 
-export const CREDITS_FOUNDATION_VERSION = "0.4.0";
+export const CREDITS_FOUNDATION_VERSION = "0.5.0";
 export const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export const MICRO_USD_PER_USD = 1_000_000;
 export const MICRO_USD_PER_CREDIT = 10_000;
@@ -586,24 +586,74 @@ export function formatDollars(usd: number): string {
   return Number.isInteger(usd) ? `$${usd}` : `$${usd.toFixed(2)}`;
 }
 
+/** Packs for prose: `$10 · $25 (suggested) · $50`. */
 export function summarizePacks(packs: readonly CreditsRequiredPack[], suggestedPackId: string): string {
-  return packs.map(pack => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " suggested" : ""}`).join(", ");
+  return packs.map(pack => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " (suggested)" : ""}`).join(" · ");
 }
 
-/** Three to five stderr lines: cost, link, what happens after payment, emailing the link. */
-export function renderCreditsRequiredForHuman(envelope: CreditsRequiredEnvelope): string {
+/** Options for human renderings that mention time or an operation. */
+export interface CreditsHumanOptions {
+  /** The operation's human label from the rate card, such as `contact enrichment`. Defaults to the ID with spaces. */
+  readonly operationLabel?: string;
+  /** Epoch milliseconds used for "valid for …"; defaults to `Date.now()`. */
+  readonly now?: number;
+  /** IANA time zone for clock times; defaults to the host's. */
+  readonly timeZone?: string;
+}
+
+/** An operation ID for prose when no label is known: `enrich_contact` → `enrich contact`. */
+export function humanizeOperation(operation: string): string {
+  return operation.replace(/[_.:-]+/gu, " ").trim();
+}
+
+function clockTime(epochMs: number, timeZone: string | undefined, withDate: boolean): string {
+  const zone = timeZone === undefined ? {} : { timeZone };
+  try {
+    // Date and time are formatted apart so the joiner never depends on the ICU build.
+    const time = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", ...zone }).format(new Date(epochMs)).replace(/[\u00a0\u202f]/gu, " ");
+    if (!withDate) return time;
+    return `${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", ...zone }).format(new Date(epochMs))}, ${time}`;
+  } catch {
+    return new Date(epochMs).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+}
+
+/**
+ * How long a link stays valid, for prose: `valid for 24 hours, until 3:40 PM`,
+ * `valid for 45 minutes, until 3:40 PM`, `valid until Sep 30, 3:40 PM`, or `expired`.
+ */
+export function formatValidity(expiresAt: string, options: Pick<CreditsHumanOptions, "now" | "timeZone"> = {}): string {
+  const end = Date.parse(expiresAt);
+  if (!Number.isFinite(end)) return `valid until ${expiresAt}`;
+  const remaining = end - (options.now ?? Date.now());
+  if (remaining <= 0) return "expired";
+  const minutes = Math.round(remaining / 60_000);
+  if (minutes < 60) return `valid for ${Math.max(1, minutes)} ${minutes <= 1 ? "minute" : "minutes"}, until ${clockTime(end, options.timeZone, false)}`;
+  const hours = Math.round(remaining / 3_600_000);
+  if (hours <= 36) return `valid for ${hours} ${hours === 1 ? "hour" : "hours"}, until ${clockTime(end, options.timeZone, false)}`;
+  return `valid until ${clockTime(end, options.timeZone, true)}`;
+}
+
+/**
+ * Five stderr lines: cost, link, packs and validity, what happens after payment, emailing
+ * the link. Pass the rate card's `operationLabel` when the product has it.
+ */
+export function renderCreditsRequiredForHuman(envelope: CreditsRequiredEnvelope, options: CreditsHumanOptions = {}): string {
   const parsed = parseCreditsRequiredEnvelope(envelope);
   if (parsed === null) throw new TypeError("Invalid credits required envelope.");
   const emailCommand = parsed.commands.email.map(part => part === "{address}" ? "<address>" : formatArgv([part])).join(" ");
   const resume = formatArgv(parsed.resume.argv);
   const wait = formatArgv(parsed.commands.wait.filter(part => part !== "--json"));
+  const label = options.operationLabel !== undefined && plainText(options.operationLabel, 80)
+    ? options.operationLabel : humanizeOperation(parsed.operation);
   return [
-    `${parsed.product.name} needs $${parsed.required.usd} in credits for ${parsed.operation}; this device has $${parsed.balance.usd}.`,
-    `Add credits: ${parsed.topup.url} (valid until ${parsed.topup.expiresAt}; packs ${summarizePacks(parsed.topup.packs, parsed.topup.suggestedPackId)}).`,
+    `${parsed.product.name} needs $${parsed.required.usd} in credits for ${label}. This device has $${parsed.balance.usd}.`,
+    `Add credits: ${parsed.topup.url}`,
+    `Packs: ${summarizePacks(parsed.topup.packs, parsed.topup.suggestedPackId)}. The link is ${formatValidity(parsed.topup.expiresAt, options)}.`,
     parsed.resume.automatic
-      ? `After payment, rerun ${resume} or run ${wait}; the work resumes.`
-      : `After payment, run ${wait}, then rerun ${resume}.`,
-    `Not at this terminal? Email the link: ${emailCommand}`,
+      ? `After you pay, rerun ${resume} and the work picks up where it stopped.`
+      : `After you pay, run ${wait}, then rerun ${resume}.`,
+    `Not at this computer? Email yourself the link: ${emailCommand}`,
   ].join("\n") + "\n";
 }
 
@@ -679,3 +729,59 @@ export function creditsProtocol(profile: CreditsProductProfile) {
 }
 
 export type CreditsProtocol = ReturnType<typeof creditsProtocol>;
+
+// ---------------------------------------------------------------------------
+// Menu kit v2
+
+/**
+ * A top-level status row in a desktop-foundation menu kit v2 snapshot. These
+ * shapes mirror `StatusItemV2` and `ActionItemV2` from
+ * `@hraness/desktop-foundation`; this package does not depend on it.
+ */
+export type CreditsMenuStatusRow = Readonly<{
+  kind: "status";
+  symbol: "status.running" | "status.attention" | "status.signedOut";
+  label: string;
+  detail?: string;
+}>;
+
+/** The `Add credits` action row. It opens the browser; the product maps its ID to the topup link. */
+export type CreditsMenuAddRow = Readonly<{
+  kind: "action";
+  id: string;
+  label: "Add credits";
+  symbol: "action.add";
+  opens: "browser";
+}>;
+
+export interface CreditsMenuOptions {
+  /** Action ID for `Add credits`. Default `credits.add`. */
+  readonly id?: string;
+}
+
+const MENU_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+
+/**
+ * Standard menu rows for credits: `[status, add]`. Put the status row in the
+ * top section with the product's own status (at most two status rows there),
+ * and the `Add credits` action with the other controls. When the balance is
+ * low the status row uses `status.attention`; the product may also set its
+ * mark's tone to `attention`. Signed out, `Add credits` runs the product's
+ * topup, which creates the link; signed in, it opens `status.topup.url`.
+ */
+export function creditsMenuItems(
+  status: CreditsStatus | CreditsSignedOutStatus,
+  options: CreditsMenuOptions = {},
+): readonly [CreditsMenuStatusRow, CreditsMenuAddRow] {
+  const id = options.id ?? "credits.add";
+  if (!MENU_ACTION_ID.test(id) || id.startsWith("foundation.")) throw new TypeError("Invalid credits menu action ID.");
+  const add: CreditsMenuAddRow = Object.freeze({ kind: "action", id, label: "Add credits", symbol: "action.add", opens: "browser" });
+  if ("signedOut" in status) {
+    return Object.freeze([Object.freeze({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" }), add] as const);
+  }
+  const balance = `$${status.balance.usd} in credits`;
+  const row: CreditsMenuStatusRow = status.lowBalance
+    ? Object.freeze({ kind: "status", symbol: "status.attention", label: balance, detail: "Balance is low" })
+    : Object.freeze({ kind: "status", symbol: "status.running", label: balance });
+  return Object.freeze([row, add] as const);
+}

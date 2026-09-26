@@ -61,9 +61,8 @@ describe("state store", () => {
     const before = await readFile(h.stateFile, "utf8");
     const result = await runCreditsCommand(profile, ["signout", "--json"], h.io);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("holds the state lock");
-    expect(result.stderr).toContain(h.lockFile);
-    expect(JSON.parse(result.stdout)).toMatchObject({ error: "busy" });
+    expect(result.stderr).toBe("Another PeopleBlade credits command is running. Try again in a moment.\n");
+    expect(JSON.parse(result.stdout)).toMatchObject({ error: "busy", lockFile: h.lockFile });
     expect(await readFile(h.stateFile, "utf8")).toBe(before);
     expect(h.calls).toHaveLength(0);
   });

@@ -420,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.4.0";
+var CREDITS_FOUNDATION_VERSION = "0.5.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -802,20 +802,51 @@ function formatDollars(usd) {
   return Number.isInteger(usd) ? `$${usd}` : `$${usd.toFixed(2)}`;
 }
 function summarizePacks(packs, suggestedPackId) {
-  return packs.map((pack) => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " suggested" : ""}`).join(", ");
+  return packs.map((pack) => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " (suggested)" : ""}`).join(" · ");
 }
-function renderCreditsRequiredForHuman(envelope) {
+function humanizeOperation(operation) {
+  return operation.replace(/[_.:-]+/gu, " ").trim();
+}
+function clockTime(epochMs, timeZone, withDate) {
+  const zone = timeZone === undefined ? {} : { timeZone };
+  try {
+    const time = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", ...zone }).format(new Date(epochMs)).replace(/[\u00a0\u202f]/gu, " ");
+    if (!withDate)
+      return time;
+    return `${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", ...zone }).format(new Date(epochMs))}, ${time}`;
+  } catch {
+    return new Date(epochMs).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+}
+function formatValidity(expiresAt, options = {}) {
+  const end = Date.parse(expiresAt);
+  if (!Number.isFinite(end))
+    return `valid until ${expiresAt}`;
+  const remaining = end - (options.now ?? Date.now());
+  if (remaining <= 0)
+    return "expired";
+  const minutes = Math.round(remaining / 60000);
+  if (minutes < 60)
+    return `valid for ${Math.max(1, minutes)} ${minutes <= 1 ? "minute" : "minutes"}, until ${clockTime(end, options.timeZone, false)}`;
+  const hours = Math.round(remaining / 3600000);
+  if (hours <= 36)
+    return `valid for ${hours} ${hours === 1 ? "hour" : "hours"}, until ${clockTime(end, options.timeZone, false)}`;
+  return `valid until ${clockTime(end, options.timeZone, true)}`;
+}
+function renderCreditsRequiredForHuman(envelope, options = {}) {
   const parsed2 = parseCreditsRequiredEnvelope(envelope);
   if (parsed2 === null)
     throw new TypeError("Invalid credits required envelope.");
   const emailCommand = parsed2.commands.email.map((part) => part === "{address}" ? "<address>" : formatArgv([part])).join(" ");
   const resume = formatArgv(parsed2.resume.argv);
   const wait = formatArgv(parsed2.commands.wait.filter((part) => part !== "--json"));
+  const label = options.operationLabel !== undefined && plainText(options.operationLabel, 80) ? options.operationLabel : humanizeOperation(parsed2.operation);
   return [
-    `${parsed2.product.name} needs $${parsed2.required.usd} in credits for ${parsed2.operation}; this device has $${parsed2.balance.usd}.`,
-    `Add credits: ${parsed2.topup.url} (valid until ${parsed2.topup.expiresAt}; packs ${summarizePacks(parsed2.topup.packs, parsed2.topup.suggestedPackId)}).`,
-    parsed2.resume.automatic ? `After payment, rerun ${resume} or run ${wait}; the work resumes.` : `After payment, run ${wait}, then rerun ${resume}.`,
-    `Not at this terminal? Email the link: ${emailCommand}`
+    `${parsed2.product.name} needs $${parsed2.required.usd} in credits for ${label}. This device has $${parsed2.balance.usd}.`,
+    `Add credits: ${parsed2.topup.url}`,
+    `Packs: ${summarizePacks(parsed2.topup.packs, parsed2.topup.suggestedPackId)}. The link is ${formatValidity(parsed2.topup.expiresAt, options)}.`,
+    parsed2.resume.automatic ? `After you pay, rerun ${resume} and the work picks up where it stopped.` : `After you pay, run ${wait}, then rerun ${resume}.`,
+    `Not at this computer? Email yourself the link: ${emailCommand}`
   ].join(`
 `) + `
 `;
@@ -890,6 +921,19 @@ function creditsProtocol(profile) {
       failures: "Exit 1 means local state or the service is unavailable; report it and stop. Commands are safe to rerun. Nothing retries on its own except wait polling."
     })
   });
+}
+var MENU_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+function creditsMenuItems(status, options = {}) {
+  const id = options.id ?? "credits.add";
+  if (!MENU_ACTION_ID.test(id) || id.startsWith("foundation."))
+    throw new TypeError("Invalid credits menu action ID.");
+  const add = Object.freeze({ kind: "action", id, label: "Add credits", symbol: "action.add", opens: "browser" });
+  if ("signedOut" in status) {
+    return Object.freeze([Object.freeze({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" }), add]);
+  }
+  const balance = `$${status.balance.usd} in credits`;
+  const row = status.lowBalance ? Object.freeze({ kind: "status", symbol: "status.attention", label: balance, detail: "Balance is low" }) : Object.freeze({ kind: "status", symbol: "status.running", label: balance });
+  return Object.freeze([row, add]);
 }
 
 // src/recovery-state.ts

@@ -420,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.4.0";
+var CREDITS_FOUNDATION_VERSION = "0.5.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -802,20 +802,51 @@ function formatDollars(usd) {
   return Number.isInteger(usd) ? `$${usd}` : `$${usd.toFixed(2)}`;
 }
 function summarizePacks(packs, suggestedPackId) {
-  return packs.map((pack) => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " suggested" : ""}`).join(", ");
+  return packs.map((pack) => `${formatDollars(pack.usd)}${pack.id === suggestedPackId ? " (suggested)" : ""}`).join(" · ");
 }
-function renderCreditsRequiredForHuman(envelope) {
+function humanizeOperation(operation) {
+  return operation.replace(/[_.:-]+/gu, " ").trim();
+}
+function clockTime(epochMs, timeZone, withDate) {
+  const zone = timeZone === undefined ? {} : { timeZone };
+  try {
+    const time = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", ...zone }).format(new Date(epochMs)).replace(/[\u00a0\u202f]/gu, " ");
+    if (!withDate)
+      return time;
+    return `${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", ...zone }).format(new Date(epochMs))}, ${time}`;
+  } catch {
+    return new Date(epochMs).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+}
+function formatValidity(expiresAt, options = {}) {
+  const end = Date.parse(expiresAt);
+  if (!Number.isFinite(end))
+    return `valid until ${expiresAt}`;
+  const remaining = end - (options.now ?? Date.now());
+  if (remaining <= 0)
+    return "expired";
+  const minutes = Math.round(remaining / 60000);
+  if (minutes < 60)
+    return `valid for ${Math.max(1, minutes)} ${minutes <= 1 ? "minute" : "minutes"}, until ${clockTime(end, options.timeZone, false)}`;
+  const hours = Math.round(remaining / 3600000);
+  if (hours <= 36)
+    return `valid for ${hours} ${hours === 1 ? "hour" : "hours"}, until ${clockTime(end, options.timeZone, false)}`;
+  return `valid until ${clockTime(end, options.timeZone, true)}`;
+}
+function renderCreditsRequiredForHuman(envelope, options = {}) {
   const parsed2 = parseCreditsRequiredEnvelope(envelope);
   if (parsed2 === null)
     throw new TypeError("Invalid credits required envelope.");
   const emailCommand = parsed2.commands.email.map((part) => part === "{address}" ? "<address>" : formatArgv([part])).join(" ");
   const resume = formatArgv(parsed2.resume.argv);
   const wait = formatArgv(parsed2.commands.wait.filter((part) => part !== "--json"));
+  const label = options.operationLabel !== undefined && plainText(options.operationLabel, 80) ? options.operationLabel : humanizeOperation(parsed2.operation);
   return [
-    `${parsed2.product.name} needs $${parsed2.required.usd} in credits for ${parsed2.operation}; this device has $${parsed2.balance.usd}.`,
-    `Add credits: ${parsed2.topup.url} (valid until ${parsed2.topup.expiresAt}; packs ${summarizePacks(parsed2.topup.packs, parsed2.topup.suggestedPackId)}).`,
-    parsed2.resume.automatic ? `After payment, rerun ${resume} or run ${wait}; the work resumes.` : `After payment, run ${wait}, then rerun ${resume}.`,
-    `Not at this terminal? Email the link: ${emailCommand}`
+    `${parsed2.product.name} needs $${parsed2.required.usd} in credits for ${label}. This device has $${parsed2.balance.usd}.`,
+    `Add credits: ${parsed2.topup.url}`,
+    `Packs: ${summarizePacks(parsed2.topup.packs, parsed2.topup.suggestedPackId)}. The link is ${formatValidity(parsed2.topup.expiresAt, options)}.`,
+    parsed2.resume.automatic ? `After you pay, rerun ${resume} and the work picks up where it stopped.` : `After you pay, run ${wait}, then rerun ${resume}.`,
+    `Not at this computer? Email yourself the link: ${emailCommand}`
   ].join(`
 `) + `
 `;
@@ -890,6 +921,19 @@ function creditsProtocol(profile) {
       failures: "Exit 1 means local state or the service is unavailable; report it and stop. Commands are safe to rerun. Nothing retries on its own except wait polling."
     })
   });
+}
+var MENU_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+function creditsMenuItems(status, options = {}) {
+  const id = options.id ?? "credits.add";
+  if (!MENU_ACTION_ID.test(id) || id.startsWith("foundation."))
+    throw new TypeError("Invalid credits menu action ID.");
+  const add = Object.freeze({ kind: "action", id, label: "Add credits", symbol: "action.add", opens: "browser" });
+  if ("signedOut" in status) {
+    return Object.freeze([Object.freeze({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" }), add]);
+  }
+  const balance = `$${status.balance.usd} in credits`;
+  const row = status.lowBalance ? Object.freeze({ kind: "status", symbol: "status.attention", label: balance, detail: "Balance is low" }) : Object.freeze({ kind: "status", symbol: "status.running", label: balance });
+  return Object.freeze([row, add]);
 }
 
 // src/node.ts
@@ -1002,12 +1046,54 @@ var OUTPUT_TIMEOUT_MS = 500;
 var LOCK_RETRIES = 5;
 var LOCK_RETRY_MS = 200;
 var pendingOutputs = new WeakMap;
-var USAGE = "Usage: credits <protocol --json | status [--json] | topup [--usd N | --pack id] [--email addr] [--json] | email --to <addr> [--claim id] | wait [--claim id] [--timeout 15m] [--json] | estimate <operation> [--units N] [--json] | signout>";
+var HELP = [
+  "Usage: {command} credits <command> [options]",
+  "",
+  "Check and add credits for {product} on this device.",
+  "",
+  "Commands",
+  "  status               Show your balance",
+  "  topup                Get a link to add credits",
+  "  wait                 Wait for a payment to finish",
+  "  email --to <address> Email the link to yourself",
+  "  estimate <operation> Show what an operation costs",
+  "  signout              Forget the credits sign-in on this device",
+  "",
+  "Options",
+  "  --json               Print machine-readable output",
+  "  -h, --help           Show this help",
+  "",
+  "Example",
+  "  {command} credits topup --usd 25"
+].join(`
+`);
+var AGENT_MARKERS = ["AI_AGENT", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CURSOR_AGENT", "GEMINI_CLI"];
+var ASCII_SYMBOLS = Object.freeze({ "✓": "OK", "✗": "FAIL", "→": "->", "↻": "...", "●": "*", "○": "o", "⚠": "WARN" });
+function detectCreditsAudience(options = {}) {
+  const env = options.env ?? process.env;
+  const shared = env.HRANESS_AUDIENCE;
+  if (shared === "human" || shared === "agent" || shared === "quiet")
+    return shared;
+  if (shared === "off")
+    return "quiet";
+  if (AGENT_MARKERS.some((name) => (env[name] ?? "") !== ""))
+    return "agent";
+  return (options.stderr ?? process.stderr).isTTY === true ? "human" : "quiet";
+}
+function asciiOnly(env) {
+  if (env.HRANESS_ASCII === "1" || env.TERM === "dumb")
+    return true;
+  const locale = [env.LC_ALL, env.LC_CTYPE, env.LANG].find((value) => (value ?? "") !== "") ?? "";
+  return !/utf-?8/iu.test(locale);
+}
+function symbols(text2, env) {
+  return asciiOnly(env) ? Array.from(text2, (character) => ASCII_SYMBOLS[character] ?? character).join("") : text2;
+}
 function isFailure(value) {
   return "code" in value;
 }
 function usage(message) {
-  return { code: "usage_error", exitCode: 2, message: `${message} ${USAGE}` };
+  return { code: "usage_error", exitCode: 2, message, help: true };
 }
 function creditsStateDirectory(options = {}) {
   if (options.stateDirectory !== undefined)
@@ -1150,7 +1236,7 @@ async function withStateRetrying(context, action) {
 }
 function stateFailure(context, reason) {
   const directory = creditsStateDirectory(context.io);
-  return reason === "busy" ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command holds the state lock; try again in a moment. If none is running, remove ${join(directory, `${context.profile.id}.lock`)}.` } : { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
+  return reason === "busy" ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command is running. Try again in a moment.`, fields: { lockFile: join(directory, `${context.profile.id}.lock`) } } : { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
 }
 async function readStoredDeviceToken(profile, options = {}) {
   try {
@@ -1240,13 +1326,14 @@ class Emitter {
       await writeOutput(this.io.stderr, text2);
   }
 }
-async function emitCreditsRequired(envelope, io = {}, audience = "agent") {
+async function emitCreditsRequired(envelope, io = {}, audience, options = {}) {
   try {
     const parsed2 = parseCreditsRequiredEnvelope(envelope);
     if (parsed2 === null)
       return false;
     const sink = io.stderr ?? process.stderr;
-    return await writeOutput(sink, audience === "human" ? renderCreditsRequiredForHuman(parsed2) : json(parsed2));
+    const reader = audience ?? detectCreditsAudience({ ...io.env === undefined ? {} : { env: io.env }, stderr: sink });
+    return await writeOutput(sink, reader === "agent" ? json(parsed2) : renderCreditsRequiredForHuman(parsed2, options));
   } catch {
     return false;
   }
@@ -1360,24 +1447,25 @@ function argvText(context, ...parts) {
   return formatArgv([...context.profile.command, "credits", ...parts]);
 }
 function renderStatus(status) {
-  const held = status.held.microUsd > 0 ? `, ${moneyFromMicroUsd(status.held.microUsd).usd} held for work in progress` : "";
+  const held = status.held.microUsd > 0 ? `, $${moneyFromMicroUsd(status.held.microUsd).usd} held for work in progress` : "";
   return [
-    `${status.product.name} credits: $${status.balance.usd} (${status.balance.credits} credits)${held === "" ? "" : `, $${held.slice(2)}`}${status.lowBalance ? " — balance is low" : ""}.`,
-    ...status.account.email === undefined ? [] : [`Account: ${status.account.email}`],
-    ...status.lastPrice === undefined ? [] : [`Last operation cost $${status.lastPrice.usd}.`],
-    `Add credits: ${status.topup.url} (packs ${summarizePacks(status.topup.packs, status.topup.suggestedPackId)})`
+    `${status.lowBalance ? "⚠" : "●"} ${status.product.name} credits: $${status.balance.usd}${held}.${status.lowBalance ? " Your balance is low." : ""}`,
+    ...status.account.email === undefined ? [] : [`  Account: ${status.account.email}`],
+    ...status.lastPrice === undefined ? [] : [`  Last operation cost $${status.lastPrice.usd}.`],
+    `  Add credits: ${status.topup.url} (${summarizePacks(status.topup.packs, status.topup.suggestedPackId)})`
   ].join(`
 `) + `
 `;
 }
 function renderClaim(context, claim) {
   const packs = claim.packs.map((pack) => `${formatDollars(pack.usd)} = ${pack.credits}${pack.bonusCredits > 0 ? ` + ${pack.bonusCredits} bonus` : ""} credits${pack.id === claim.suggestedPackId ? " (suggested)" : ""}`).join("; ");
+  const validity = formatValidity(claim.expiresAt, { now: context.now(), ...context.io.timeZone === undefined ? {} : { timeZone: context.io.timeZone } });
   return [
-    `Add ${claim.product.name} credits: ${claim.url}`,
-    `Packs: ${packs}.`,
-    `The link is valid until ${claim.expiresAt}. After paying, run ${argvText(context, "wait")} or rerun your command.`,
-    `Not at this terminal? ${argvText(context, "email", "--to")} <address>`,
-    ...claim.balance === undefined ? [] : [`Current balance: $${claim.balance.usd} (${claim.balance.credits} credits).`]
+    `→ Add ${claim.product.name} credits: ${claim.url}`,
+    `  Packs: ${packs}.`,
+    `  The link is ${validity === "expired" ? "expired" : validity}. After you pay, run ${argvText(context, "wait")} or rerun your command.`,
+    `  Not at this computer? Email yourself the link: ${argvText(context, "email", "--to")} <address>`,
+    ...claim.balance === undefined ? [] : [`  Current balance: $${claim.balance.usd}.`]
   ].join(`
 `) + `
 `;
@@ -1424,7 +1512,7 @@ async function statusCommand(context, rest) {
     return {
       exitCode: 0,
       json: signedOut(context),
-      human: `No ${context.profile.name} credits are set up on this device. Add credits: ${argvText(context, "topup")}
+      human: `○ No ${context.profile.name} credits on this device yet. Add some: ${argvText(context, "topup")}
 `
     };
   }
@@ -1528,7 +1616,7 @@ async function emailCommand(context, rest) {
     exitCode: 0,
     json: { sentTo: body.sentTo },
     jsonAlways: true,
-    human: `Sent the ${context.profile.name} credits link to ${body.sentTo}.
+    human: `✓ Sent the ${context.profile.name} credits link to ${body.sentTo}.
 `
   };
 }
@@ -1575,10 +1663,13 @@ async function waitCommand(context, rest) {
   if (!preflight.ok)
     return stateFailure(context, preflight.reason);
   const { claimId, bearer } = credentials;
-  if (!context.json) {
-    const validity = credentials.expiresAt === undefined ? "" : `; link valid until ${credentials.expiresAt}`;
-    await context.emitter.err(`Waiting for payment at ${claimUrl(context.client.origin, claimId)} (polling every 5 s for up to ${timeoutText}${validity}).
-`);
+  if (!context.json && context.audience === "human") {
+    await context.emitter.err(symbols([
+      `↻ Waiting for payment at ${claimUrl(context.client.origin, claimId)}`,
+      `  Checking every 5 seconds for up to ${timeoutText}. Press Ctrl-C to stop; paying still works.`
+    ].join(`
+`) + `
+`, context.io.env ?? process.env));
   }
   const deadline = context.now() + timeoutMs;
   let last;
@@ -1635,12 +1726,13 @@ async function settleClaim(context, status, hadToken) {
     const rescue = token === undefined ? "" : ` The issued device token could not be stored; add it as "token" in that file to keep this purchase usable here: ${token}`;
     return { code: stored.reason === "busy" ? "busy" : "state_unavailable", exitCode: 1, message: `Paid, but the ${context.profile.name} credits state under ${creditsStateDirectory(context.io)} could not be updated.${rescue}` };
   }
-  const balance = status.balance === undefined ? "" : ` ${context.profile.name} balance: $${status.balance.usd} (${status.balance.credits} credits).`;
+  const balance = status.balance === undefined ? "" : ` ${context.profile.name} balance: $${status.balance.usd}.`;
   return {
     exitCode: 0,
     json: visible,
-    human: `Paid.${balance}${token === undefined ? "" : " This device is now signed in."}
-`
+    human: `✓ Payment received.${balance}
+`,
+    next: "rerun your command"
   };
 }
 async function estimateCommand(context, rest) {
@@ -1707,13 +1799,16 @@ async function signoutCommand(context, rest) {
     exitCode: 0,
     json: { signedOut: true },
     jsonAlways: true,
-    human: result.value ? `Forgot the ${context.profile.name} credits token on this device.
-` : `No ${context.profile.name} credits token was stored on this device.
+    human: result.value ? `✓ Signed out of ${context.profile.name} credits on this device. Your balance stays with your account.
+` : `○ ${context.profile.name} credits weren't signed in on this device.
 `
   };
 }
 async function dispatch(context, argv) {
   const [command, ...rest] = argv;
+  if (command === undefined || argv.length === 1 && (command === "-h" || command === "--help" || command === "help")) {
+    return { exitCode: 0, json: null, human: "", help: helpText(context) };
+  }
   switch (command) {
     case "protocol":
       if (rest.length !== 1 || rest[0] !== "--json")
@@ -1732,25 +1827,35 @@ async function dispatch(context, argv) {
     case "signout":
       return signoutCommand(context, rest);
     default:
-      return usage(command === undefined ? "A credits command is required." : `Unknown credits command "${sanitizeText(command, 40)}".`);
+      return usage(`Unknown credits command "${sanitizeText(command, 40)}".`);
   }
+}
+function helpText(context) {
+  const command = formatArgv(context.profile.command);
+  return (command === "" ? HELP.replaceAll("{command} ", "") : HELP.replaceAll("{command}", command)).replaceAll("{product}", context.profile.name) + `
+`;
 }
 async function runCreditsCommand(profile, argv = [], io = {}) {
   const emitter = new Emitter(io);
   const args = Array.from(argv);
-  const wantsJson = args.includes("--json");
+  const env = io.env ?? process.env;
+  const audience = io.audience ?? detectCreditsAudience({ env, stderr: io.stderr ?? process.stderr });
+  const wantsJson = args.includes("--json") || audience === "agent";
   let outcome;
+  let command = "credits";
   try {
     const parsed2 = parseCreditsProfile(profile);
     if (parsed2 === null) {
       outcome = { code: "usage_error", exitCode: 2, message: "Invalid credits product profile." };
     } else {
+      command = formatArgv([...parsed2.command, "credits"]);
       const context = {
         profile: parsed2,
         io,
         client: serviceClient(parsed2, io),
         emitter,
         json: wantsJson,
+        audience,
         now: io.now ?? Date.now,
         sleep: io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
       };
@@ -1767,14 +1872,24 @@ async function runCreditsCommand(profile, argv = [], io = {}) {
         ...outcome.service === undefined ? {} : { service: outcome.service },
         ...outcome.fields ?? {}
       }));
-    }
-    await emitter.err(`${outcome.message}
+      await emitter.err(`${outcome.message}
 `);
+    } else {
+      const next = outcome.help === true ? `
+→ ${command} --help` : "";
+      await emitter.err(symbols(`✗ ${outcome.message}${next}
+`, env));
+    }
+  } else if (outcome.help !== undefined) {
+    await emitter.out(outcome.help);
   } else {
-    if (wantsJson || outcome.jsonAlways === true)
+    if (wantsJson || outcome.jsonAlways === true && audience !== "human")
       await emitter.out(json(outcome.json));
     if (!wantsJson && outcome.human !== "")
-      await emitter.err(outcome.human);
+      await emitter.err(symbols(outcome.human, env));
+    if (!wantsJson && audience === "human" && outcome.next !== undefined)
+      await emitter.err(`Next: ${outcome.next}
+`);
   }
   return { exitCode: outcome.exitCode, stdout: emitter.stdout, stderr: emitter.stderr };
 }
@@ -1782,5 +1897,6 @@ export {
   runCreditsCommand,
   readStoredDeviceToken,
   emitCreditsRequired,
+  detectCreditsAudience,
   creditsStateDirectory
 };

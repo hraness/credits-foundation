@@ -28,7 +28,7 @@ does not enter card details, open a browser, or send email itself.
   service's answer is the price.
 - The payment message. `buildCreditsRequiredEnvelope` produces the exact
   `hraness-credits-required-v1` line, with a fixed instruction sentence, and
-  `renderCreditsRequiredForHuman` turns it into four lines for a terminal. The
+  `renderCreditsRequiredForHuman` turns it into five lines for a terminal. The
   parser accepts only that sentence, so an envelope cannot carry other
   instructions to an agent. The envelope is guidance for cooperating agents;
   it cannot force one to behave.
@@ -79,20 +79,31 @@ const envelope = buildCreditsRequiredEnvelope({
 process.stderr.write(renderCreditsRequiredForHuman(envelope));
 ```
 
-The call writes these four lines and nothing else; no state or network is
+The call writes these five lines and nothing else; no state or network is
 involved:
 
 ```
-PeopleBlade needs $12.50 in credits for enrich_contact; this device has $0.00.
-Add credits: https://credits.hraness.com/t/clm_8f3k2q (valid until 2026-09-17T22:00:00Z; packs $10, $25 suggested).
-After payment, rerun peopleblade cloud enrich --list founders or run peopleblade credits wait; the work resumes.
-Not at this terminal? Email the link: peopleblade credits email --to <address>
+PeopleBlade needs $12.50 in credits for enrich contact. This device has $0.00.
+Add credits: https://credits.hraness.com/t/clm_8f3k2q
+Packs: $10 · $25 (suggested). The link is valid for 24 hours, until 10:00 PM.
+After you pay, rerun peopleblade cloud enrich --list founders and the work picks up where it stopped.
+Not at this computer? Email yourself the link: peopleblade credits email --to <address>
 ```
 
+Pass `{ operationLabel }` (the rate card's label for the operation) to name it
+the way people know it; without one, the operation ID is spelled out as words.
+`now` and `timeZone` pin the clock for tests.
+
 `JSON.stringify(envelope)` is the one-line agent form. The Node helper
-`emitCreditsRequired(envelope, { stderr }, "agent" | "human")` writes either
-form through a bounded write that never throws, so a closed pipe cannot change
-the product's exit code. The product still exits with its own failure code and,
+`emitCreditsRequired(envelope, { stderr, env }, audience?, options?)` writes
+either form through a bounded write that never throws, so a closed pipe cannot
+change the product's exit code. Leave `audience` unset to follow the shared
+Hraness rule (`detectCreditsAudience`): `HRANESS_AUDIENCE` (`human`, `agent`,
+`quiet` or `off`) wins; then any of the exact agent markers `AI_AGENT`,
+`CLAUDECODE`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`,
+`CURSOR_AGENT` or `GEMINI_CLI` selects the JSON line; otherwise people and
+pipes get the text. An agent host without one of these markers sets
+`HRANESS_AUDIENCE=agent`. The product still exits with its own failure code and,
 in its own `--json` envelope, sets `error.code` to `credits_required`.
 
 ## Connect a CLI
@@ -112,11 +123,21 @@ process.exitCode = result.exitCode;
 `command` is the executable and fixed prefix arguments as argv elements, never
 shell text; every command array the package prints starts with it. When
 `stdout` and `stderr` sinks are passed, output is written as it is produced
-(`wait` announces itself before polling); the result carries the same text
-either way. JSON goes to stdout only, human text to stderr only.
+(`wait` announces itself before polling at a terminal); the result carries
+the same text either way. JSON and help go to stdout, human text to stderr.
+
+The same audience rule applies (or pass `audience` in `io`). A detected agent
+gets JSON without `--json`. A person at a terminal gets text only, including
+from `email` and `signout`, which otherwise print their JSON for scripts, plus
+one `Next:` hint after `wait`. Errors read `✗ what happened` with `→ … credits
+--help` for usage mistakes. Symbols fall back to ASCII (`OK`, `FAIL`, `->`)
+when `TERM=dumb`, the locale is not UTF-8, or `HRANESS_ASCII=1`. No output is
+colored. `credits`, `credits help`, `-h` and `--help` print grouped help and
+exit 0.
 
 | Arguments after `credits` | Effect | stdout |
 | --- | --- | --- |
+| (none), `help`, `-h`, `--help` | Print grouped help for people. Pure. | help text |
 | `protocol --json` | Describe commands and lifecycle. Pure. | `hraness-credits-protocol-v1` |
 | `status [--json]` | Read the balance for the stored device token; without a token, report `signedOut: true` and the topup command. Network only with a token. | `hraness-credits-status-v1` |
 | `topup [--usd N \| --pack id] [--email addr] [--json]` | Create a claim, bound to the stored token when one exists, and print the link. `--usd` picks the pack with that price from the rate card. Network. | `hraness-credits-claim-v1` without `claimSecret` |
@@ -135,7 +156,8 @@ Every request carries `user-agent: hraness-credits-foundation/<version>
 (<product id>)` and a 10-second timeout; nothing retries except `wait`, which
 keeps polling through outages until its deadline. HTTP errors become exit
 codes, never exceptions. The `io` argument also accepts an injectable `fetch`,
-`env`, `stateDirectory`, `now`, `sleep`, `requestTimeoutMs`, and `deviceLabel`
+`env`, `stateDirectory`, `now`, `sleep`, `requestTimeoutMs`, `audience`,
+`timeZone`, and `deviceLabel`
 (the label sent with a new claim so a person can recognise the device; it
 defaults to the hostname and `null` sends none). Product code reads the token
 for its own metered requests with `readStoredDeviceToken(profile)`, which
@@ -156,6 +178,17 @@ untouched and reported as unavailable, never reset.
 Commands never print device tokens or claim secrets. The one exception is a
 rescue: if `wait` receives the once-only token and then cannot write the state
 file, the failure message includes the token so the paid purchase is not lost.
+
+## Show credits in a menu
+
+`creditsMenuItems(status)` returns two desktop-foundation menu kit v2 rows for
+a `status --json` result: a status row (`$8.10 in credits`, with
+`status.attention` and "Balance is low" when the balance is low, or
+`status.signedOut` "No credits on this device") and an `Add credits` action
+(`symbol: "action.add"`, `opens: "browser"`, ID `credits.add` unless you pass
+`{ id }`). Put the status row in the menu's top section next to the product's
+own status and the action with the other controls. Map the action to
+`status.topup.url`, or to the product's topup when signed out.
 
 ## Meter work from a product backend
 

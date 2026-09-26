@@ -5,11 +5,11 @@ import { homedir, hostname } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
   CREDITS_ESTIMATE_SCHEMA, CREDITS_FOUNDATION_VERSION, CREDITS_SERVICE_ORIGIN, CREDITS_STATE_SCHEMA, CREDITS_STATUS_SCHEMA,
-  claimUrl, creditsProtocol, formatArgv, formatDollars, isCreditsClaimId, isCreditsClaimSecret, isCreditsDeviceToken,
+  claimUrl, creditsProtocol, formatArgv, formatDollars, formatValidity, isCreditsClaimId, isCreditsClaimSecret, isCreditsDeviceToken,
   isCreditsEmail, isCreditsOperation, isCreditsPackId, isCreditsTimestamp, microUsdFromUsd, moneyFromMicroUsd,
   parseCreditsClaim, parseCreditsClaimStatus, parseCreditsErrorEnvelope, parseCreditsProfile, parseCreditsRateCard,
   parseCreditsRequiredEnvelope, parseCreditsStatus, priceUnit, renderCreditsRequiredForHuman, summarizePacks,
-  type CreditsClaim, type CreditsClaimStatus, type CreditsEstimate, type CreditsFetch, type CreditsProductProfile,
+  type CreditsClaim, type CreditsClaimStatus, type CreditsEstimate, type CreditsFetch, type CreditsHumanOptions, type CreditsProductProfile,
   type CreditsRateCard, type CreditsRequiredEnvelope, type CreditsSignedOutStatus, type CreditsStatus,
 } from "./index.js";
 import { UUID, errorCode, plainText, safeInteger, sanitizeText, shape } from "./internal.js";
@@ -24,7 +24,32 @@ const OUTPUT_TIMEOUT_MS = 500;
 const LOCK_RETRIES = 5;
 const LOCK_RETRY_MS = 200;
 const pendingOutputs = new WeakMap<CreditsOutput, symbol>();
-const USAGE = "Usage: credits <protocol --json | status [--json] | topup [--usd N | --pack id] [--email addr] [--json] | email --to <addr> [--claim id] | wait [--claim id] [--timeout 15m] [--json] | estimate <operation> [--units N] [--json] | signout>";
+const HELP = [
+  "Usage: {command} credits <command> [options]",
+  "",
+  "Check and add credits for {product} on this device.",
+  "",
+  "Commands",
+  "  status               Show your balance",
+  "  topup                Get a link to add credits",
+  "  wait                 Wait for a payment to finish",
+  "  email --to <address> Email the link to yourself",
+  "  estimate <operation> Show what an operation costs",
+  "  signout              Forget the credits sign-in on this device",
+  "",
+  "Options",
+  "  --json               Print machine-readable output",
+  "  -h, --help           Show this help",
+  "",
+  "Example",
+  "  {command} credits topup --usd 25",
+].join("\n");
+
+// TODO(df-0.8): use detectAudience from @hraness/desktop-foundation. This copy
+// follows the shared Hraness CLI contract verbatim, because this package must
+// not depend on desktop-foundation. Only exact names count as agent markers.
+const AGENT_MARKERS = ["AI_AGENT", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CURSOR_AGENT", "GEMINI_CLI"] as const;
+const ASCII_SYMBOLS: Readonly<Record<string, string>> = Object.freeze({ "✓": "OK", "✗": "FAIL", "→": "->", "↻": "...", "●": "*", "○": "o", "⚠": "WARN" });
 
 export interface CreditsOutput {
   readonly isTTY?: boolean;
@@ -52,6 +77,15 @@ export interface CreditsCommandIo extends CreditsStateOptions {
   /** Label sent with new claims so a person can recognise this device. Defaults to the hostname; null sends none. */
   readonly deviceLabel?: string | null;
   readonly requestTimeoutMs?: number;
+  /**
+   * Who reads the output. Unset, it follows `detectCreditsAudience` with `env`
+   * and `stderr` (or the process's). A detected agent gets JSON without
+   * `--json`; a person never gets the JSON that `email` and `signout` print
+   * for scripts.
+   */
+  readonly audience?: CreditsAudience;
+  /** IANA time zone for clock times in human text; defaults to the host's. */
+  readonly timeZone?: string;
 }
 
 export interface CreditsCommandResult {
@@ -60,7 +94,34 @@ export interface CreditsCommandResult {
   readonly stderr: string;
 }
 
-export type CreditsAudience = "agent" | "human";
+/** Who reads the output: a person at a terminal, a detected agent, or nobody known (plain text, no hints). */
+export type CreditsAudience = "agent" | "human" | "quiet";
+
+/**
+ * The shared Hraness audience rule: `HRANESS_AUDIENCE` (`human`, `agent`,
+ * `quiet`, or `off` = quiet), then any exact agent marker set to a nonempty
+ * value, then `human` when stderr is a terminal, otherwise `quiet`.
+ */
+export function detectCreditsAudience(options: { env?: Readonly<Record<string, string | undefined>>; stderr?: { readonly isTTY?: boolean } } = {}): CreditsAudience {
+  const env = options.env ?? process.env;
+  const shared = env.HRANESS_AUDIENCE;
+  if (shared === "human" || shared === "agent" || shared === "quiet") return shared;
+  if (shared === "off") return "quiet";
+  if (AGENT_MARKERS.some(name => (env[name] ?? "") !== "")) return "agent";
+  return (options.stderr ?? process.stderr).isTTY === true ? "human" : "quiet";
+}
+
+function asciiOnly(env: Readonly<Record<string, string | undefined>>): boolean {
+  if (env.HRANESS_ASCII === "1" || env.TERM === "dumb") return true;
+  // The first nonempty of LC_ALL, LC_CTYPE, LANG is the effective character locale.
+  const locale = [env.LC_ALL, env.LC_CTYPE, env.LANG].find(value => (value ?? "") !== "") ?? "";
+  return !/utf-?8/iu.test(locale);
+}
+
+/** Replace CLI symbols with ASCII on plain terminals (`TERM=dumb`, a non-UTF-8 locale, `HRANESS_ASCII=1`). */
+function symbols(text: string, env: Readonly<Record<string, string | undefined>>): string {
+  return asciiOnly(env) ? Array.from(text, character => ASCII_SYMBOLS[character] ?? character).join("") : text;
+}
 export type CreditsStateResult<T> = { ok: true; value: T } | { ok: false; reason: "busy" | "state-unavailable" };
 
 interface PendingClaim { id: string; secret?: string; expiresAt: string }
@@ -78,6 +139,8 @@ type StateResult<T> = CreditsStateResult<T> | { ok: false; reason: "state-unavai
 
 interface Failure {
   readonly code: string;
+  /** Human text adds `→ {command} credits --help` below the message. */
+  readonly help?: true;
   readonly exitCode: 1 | 2 | 3;
   readonly message: string;
   readonly service?: Readonly<{ status: number; code?: string }>;
@@ -87,6 +150,10 @@ interface Success {
   readonly exitCode: 0;
   readonly json: unknown;
   readonly human: string;
+  /** One `Next:` hint for a person at a terminal. */
+  readonly next?: string;
+  /** Help text for stdout. */
+  readonly help?: string;
   /** Commands whose stdout is always JSON (`email`, `signout`). */
   readonly jsonAlways?: boolean;
 }
@@ -98,6 +165,7 @@ interface Context {
   readonly client: Client;
   readonly emitter: Emitter;
   readonly json: boolean;
+  readonly audience: CreditsAudience;
   readonly now: () => number;
   readonly sleep: (ms: number) => Promise<void>;
 }
@@ -107,7 +175,7 @@ function isFailure<T extends object>(value: T | Failure): value is Failure {
 }
 
 function usage(message: string): Failure {
-  return { code: "usage_error", exitCode: 2, message: `${message} ${USAGE}` };
+  return { code: "usage_error", exitCode: 2, message, help: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +335,7 @@ async function withStateRetrying<T>(
 function stateFailure(context: Context, reason: "busy" | "state-unavailable"): Failure {
   const directory = creditsStateDirectory(context.io);
   return reason === "busy"
-    ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command holds the state lock; try again in a moment. If none is running, remove ${join(directory, `${context.profile.id}.lock`)}.` }
+    ? { code: "busy", exitCode: 1, message: `Another ${context.profile.name} credits command is running. Try again in a moment.`, fields: { lockFile: join(directory, `${context.profile.id}.lock`) } }
     : { code: "state_unavailable", exitCode: 1, message: `${context.profile.name} credits state is unavailable or malformed under ${directory}; it was left unchanged.` };
 }
 
@@ -357,17 +425,24 @@ class Emitter {
   }
 }
 
-/** Print a required envelope for products: one JSON line for agents, the human rendering otherwise. */
+/**
+ * Print a required envelope for products: one JSON line for a detected agent,
+ * the human rendering otherwise. Unset, the audience follows
+ * `detectCreditsAudience` with `io.env` and the stderr sink, so a person at a
+ * terminal and a plain pipe both get text, and only agents get JSON.
+ */
 export async function emitCreditsRequired(
   envelope: CreditsRequiredEnvelope,
-  io: Pick<CreditsCommandIo, "stderr"> = {},
-  audience: CreditsAudience = "agent",
+  io: Pick<CreditsCommandIo, "stderr" | "env"> = {},
+  audience?: CreditsAudience,
+  options: CreditsHumanOptions = {},
 ): Promise<boolean> {
   try {
     const parsed = parseCreditsRequiredEnvelope(envelope);
     if (parsed === null) return false;
     const sink = io.stderr ?? process.stderr;
-    return await writeOutput(sink, audience === "human" ? renderCreditsRequiredForHuman(parsed) : json(parsed));
+    const reader = audience ?? detectCreditsAudience({ ...(io.env === undefined ? {} : { env: io.env }), stderr: sink });
+    return await writeOutput(sink, reader === "agent" ? json(parsed) : renderCreditsRequiredForHuman(parsed, options));
   } catch {
     return false;
   }
@@ -490,12 +565,12 @@ function argvText(context: Context, ...parts: string[]): string {
 }
 
 function renderStatus(status: CreditsStatus): string {
-  const held = status.held.microUsd > 0 ? `, ${moneyFromMicroUsd(status.held.microUsd).usd} held for work in progress` : "";
+  const held = status.held.microUsd > 0 ? `, $${moneyFromMicroUsd(status.held.microUsd).usd} held for work in progress` : "";
   return [
-    `${status.product.name} credits: $${status.balance.usd} (${status.balance.credits} credits)${held === "" ? "" : `, $${held.slice(2)}`}${status.lowBalance ? " — balance is low" : ""}.`,
-    ...(status.account.email === undefined ? [] : [`Account: ${status.account.email}`]),
-    ...(status.lastPrice === undefined ? [] : [`Last operation cost $${status.lastPrice.usd}.`]),
-    `Add credits: ${status.topup.url} (packs ${summarizePacks(status.topup.packs, status.topup.suggestedPackId)})`,
+    `${status.lowBalance ? "⚠" : "●"} ${status.product.name} credits: $${status.balance.usd}${held}.${status.lowBalance ? " Your balance is low." : ""}`,
+    ...(status.account.email === undefined ? [] : [`  Account: ${status.account.email}`]),
+    ...(status.lastPrice === undefined ? [] : [`  Last operation cost $${status.lastPrice.usd}.`]),
+    `  Add credits: ${status.topup.url} (${summarizePacks(status.topup.packs, status.topup.suggestedPackId)})`,
   ].join("\n") + "\n";
 }
 
@@ -503,12 +578,13 @@ function renderClaim(context: Context, claim: CreditsClaim): string {
   const packs = claim.packs.map(pack =>
     `${formatDollars(pack.usd)} = ${pack.credits}${pack.bonusCredits > 0 ? ` + ${pack.bonusCredits} bonus` : ""} credits${pack.id === claim.suggestedPackId ? " (suggested)" : ""}`,
   ).join("; ");
+  const validity = formatValidity(claim.expiresAt, { now: context.now(), ...(context.io.timeZone === undefined ? {} : { timeZone: context.io.timeZone }) });
   return [
-    `Add ${claim.product.name} credits: ${claim.url}`,
-    `Packs: ${packs}.`,
-    `The link is valid until ${claim.expiresAt}. After paying, run ${argvText(context, "wait")} or rerun your command.`,
-    `Not at this terminal? ${argvText(context, "email", "--to")} <address>`,
-    ...(claim.balance === undefined ? [] : [`Current balance: $${claim.balance.usd} (${claim.balance.credits} credits).`]),
+    `→ Add ${claim.product.name} credits: ${claim.url}`,
+    `  Packs: ${packs}.`,
+    `  The link is ${validity === "expired" ? "expired" : validity}. After you pay, run ${argvText(context, "wait")} or rerun your command.`,
+    `  Not at this computer? Email yourself the link: ${argvText(context, "email", "--to")} <address>`,
+    ...(claim.balance === undefined ? [] : [`  Current balance: $${claim.balance.usd}.`]),
   ].join("\n") + "\n";
 }
 
@@ -551,7 +627,7 @@ async function statusCommand(context: Context, rest: readonly string[]): Promise
     return {
       exitCode: 0,
       json: signedOut(context),
-      human: `No ${context.profile.name} credits are set up on this device. Add credits: ${argvText(context, "topup")}\n`,
+      human: `○ No ${context.profile.name} credits on this device yet. Add some: ${argvText(context, "topup")}\n`,
     };
   }
   const response = await context.client.get("/v1/balance", state.value);
@@ -633,7 +709,7 @@ async function emailCommand(context: Context, rest: readonly string[]): Promise<
     exitCode: 0,
     json: { sentTo: body.sentTo },
     jsonAlways: true,
-    human: `Sent the ${context.profile.name} credits link to ${body.sentTo}.\n`,
+    human: `✓ Sent the ${context.profile.name} credits link to ${body.sentTo}.\n`,
   };
 }
 
@@ -679,9 +755,11 @@ async function waitCommand(context: Context, rest: readonly string[]): Promise<O
   const preflight = await withStateRetrying(context, () => ({ value: true, changed: true }));
   if (!preflight.ok) return stateFailure(context, preflight.reason);
   const { claimId, bearer } = credentials;
-  if (!context.json) {
-    const validity = credentials.expiresAt === undefined ? "" : `; link valid until ${credentials.expiresAt}`;
-    await context.emitter.err(`Waiting for payment at ${claimUrl(context.client.origin, claimId)} (polling every 5 s for up to ${timeoutText}${validity}).\n`);
+  if (!context.json && context.audience === "human") {
+    await context.emitter.err(symbols([
+      `↻ Waiting for payment at ${claimUrl(context.client.origin, claimId)}`,
+      `  Checking every 5 seconds for up to ${timeoutText}. Press Ctrl-C to stop; paying still works.`,
+    ].join("\n") + "\n", context.io.env ?? process.env));
   }
   const deadline = context.now() + timeoutMs;
   let last: CreditsClaimStatus | undefined;
@@ -734,11 +812,12 @@ async function settleClaim(context: Context, status: CreditsClaimStatus, hadToke
     const rescue = token === undefined ? "" : ` The issued device token could not be stored; add it as "token" in that file to keep this purchase usable here: ${token}`;
     return { code: stored.reason === "busy" ? "busy" : "state_unavailable", exitCode: 1, message: `Paid, but the ${context.profile.name} credits state under ${creditsStateDirectory(context.io)} could not be updated.${rescue}` };
   }
-  const balance = status.balance === undefined ? "" : ` ${context.profile.name} balance: $${status.balance.usd} (${status.balance.credits} credits).`;
+  const balance = status.balance === undefined ? "" : ` ${context.profile.name} balance: $${status.balance.usd}.`;
   return {
     exitCode: 0,
     json: visible,
-    human: `Paid.${balance}${token === undefined ? "" : " This device is now signed in."}\n`,
+    human: `✓ Payment received.${balance}\n`,
+    next: "rerun your command",
   };
 }
 
@@ -790,13 +869,16 @@ async function signoutCommand(context: Context, rest: readonly string[]): Promis
     json: { signedOut: true },
     jsonAlways: true,
     human: result.value
-      ? `Forgot the ${context.profile.name} credits token on this device.\n`
-      : `No ${context.profile.name} credits token was stored on this device.\n`,
+      ? `✓ Signed out of ${context.profile.name} credits on this device. Your balance stays with your account.\n`
+      : `○ ${context.profile.name} credits weren't signed in on this device.\n`,
   };
 }
 
 async function dispatch(context: Context, argv: readonly string[]): Promise<Outcome> {
   const [command, ...rest] = argv;
+  if (command === undefined || (argv.length === 1 && (command === "-h" || command === "--help" || command === "help"))) {
+    return { exitCode: 0, json: null, human: "", help: helpText(context) };
+  }
   switch (command) {
     case "protocol":
       if (rest.length !== 1 || rest[0] !== "--json") return usage("protocol requires --json.");
@@ -807,8 +889,14 @@ async function dispatch(context: Context, argv: readonly string[]): Promise<Outc
     case "wait": return waitCommand(context, rest);
     case "estimate": return estimateCommand(context, rest);
     case "signout": return signoutCommand(context, rest);
-    default: return usage(command === undefined ? "A credits command is required." : `Unknown credits command "${sanitizeText(command, 40)}".`);
+    default: return usage(`Unknown credits command "${sanitizeText(command, 40)}".`);
   }
+}
+
+function helpText(context: Context): string {
+  const command = formatArgv(context.profile.command);
+  return (command === "" ? HELP.replaceAll("{command} ", "") : HELP.replaceAll("{command}", command))
+    .replaceAll("{product}", context.profile.name) + "\n";
 }
 
 /**
@@ -823,19 +911,25 @@ export async function runCreditsCommand(
 ): Promise<CreditsCommandResult> {
   const emitter = new Emitter(io);
   const args = Array.from(argv);
-  const wantsJson = args.includes("--json");
+  const env = io.env ?? process.env;
+  const audience = io.audience ?? detectCreditsAudience({ env, stderr: io.stderr ?? process.stderr });
+  // `--json` always wins; a detected agent gets JSON by default.
+  const wantsJson = args.includes("--json") || audience === "agent";
   let outcome: Outcome;
+  let command = "credits";
   try {
     const parsed = parseCreditsProfile(profile);
     if (parsed === null) {
       outcome = { code: "usage_error", exitCode: 2, message: "Invalid credits product profile." };
     } else {
+      command = formatArgv([...parsed.command, "credits"]);
       const context: Context = {
         profile: parsed,
         io,
         client: serviceClient(parsed, io),
         emitter,
         json: wantsJson,
+        audience,
         now: io.now ?? Date.now,
         sleep: io.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))),
       };
@@ -852,11 +946,18 @@ export async function runCreditsCommand(
         ...(outcome.service === undefined ? {} : { service: outcome.service }),
         ...(outcome.fields ?? {}),
       }));
+      await emitter.err(`${outcome.message}\n`);
+    } else {
+      const next = outcome.help === true ? `\n→ ${command} --help` : "";
+      await emitter.err(symbols(`✗ ${outcome.message}${next}\n`, env));
     }
-    await emitter.err(`${outcome.message}\n`);
+  } else if (outcome.help !== undefined) {
+    await emitter.out(outcome.help);
   } else {
-    if (wantsJson || outcome.jsonAlways === true) await emitter.out(json(outcome.json));
-    if (!wantsJson && outcome.human !== "") await emitter.err(outcome.human);
+    // `email` and `signout` keep JSON on stdout for scripts, but never for a person at a terminal.
+    if (wantsJson || (outcome.jsonAlways === true && audience !== "human")) await emitter.out(json(outcome.json));
+    if (!wantsJson && outcome.human !== "") await emitter.err(symbols(outcome.human, env));
+    if (!wantsJson && audience === "human" && outcome.next !== undefined) await emitter.err(`Next: ${outcome.next}\n`);
   }
   return { exitCode: outcome.exitCode, stdout: emitter.stdout, stderr: emitter.stderr };
 }

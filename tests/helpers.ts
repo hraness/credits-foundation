@@ -137,10 +137,13 @@ export async function harness(route: Route, overrides: Partial<CreditsCommandIo>
   let clock = 1_789_600_000_000;
   const io: CreditsCommandIo = {
     fetch,
-    env: { XDG_STATE_HOME: home },
+    env: { XDG_STATE_HOME: home, LANG: "en_US.UTF-8" },
     now: () => clock,
     sleep: async ms => { clock += ms; },
     deviceLabel: "test-device",
+    // Deterministic regardless of the terminal running the tests; human and agent cases opt in.
+    audience: "quiet",
+    timeZone: "UTC",
     ...overrides,
   };
   const directory = join(home, "hraness", "credits");

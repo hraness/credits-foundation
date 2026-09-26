@@ -55,7 +55,12 @@ describe("protocol and usage", () => {
   test("usage errors exit 2 and explain", async () => {
     const h = await setup();
     expect((await run(h, ["protocol"])).exitCode).toBe(2);
-    expect((await run(h, [])).stderr).toContain("Usage: credits");
+    const bare = await run(h, []);
+    expect(bare.exitCode).toBe(0);
+    expect(bare.stdout).toStartWith("Usage: peopleblade credits <command> [options]\n");
+    const unknown = await run(h, ["stauts"]);
+    expect(unknown.exitCode).toBe(2);
+    expect(unknown.stderr).toBe('✗ Unknown credits command "stauts".\n→ peopleblade credits --help\n');
     const bogus = await run(h, ["bogus", "--json"]);
     expect(bogus.exitCode).toBe(2);
     expect(JSON.parse(bogus.stdout)).toMatchObject({ error: "usage_error" });
@@ -80,7 +85,7 @@ describe("status", () => {
     expect(result.stderr).toBe("");
     const human = await run(h, ["status"]);
     expect(human.stdout).toBe("");
-    expect(human.stderr).toContain("peopleblade credits topup");
+    expect(human.stderr).toBe("○ No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n");
     expect(h.calls).toHaveLength(0);
   });
 
@@ -99,10 +104,10 @@ describe("status", () => {
     const human = await run(h, ["status"]);
     expect(human.stdout).toBe("");
     expect(human.stderr).toBe([
-      "PeopleBlade credits: $8.10 (810 credits), $0.50 held for work in progress.",
-      "Account: reader@example.com",
-      "Last operation cost $0.20.",
-      `Add credits: ${ORIGIN}/t/${CLAIM_ID} (packs $10, $25 suggested, $50, $100)`,
+      "● PeopleBlade credits: $8.10, $0.50 held for work in progress.",
+      "  Account: reader@example.com",
+      "  Last operation cost $0.20.",
+      `  Add credits: ${ORIGIN}/t/${CLAIM_ID} ($10 · $25 (suggested) · $50 · $100)`,
     ].join("\n") + "\n");
   });
 
@@ -174,7 +179,7 @@ describe("topup", () => {
     expect(h.calls).toHaveLength(3);
     const missing = await run(h, ["topup", "--usd", "7"]);
     expect(missing.exitCode).toBe(2);
-    expect(missing.stderr).toContain("No PeopleBlade pack costs $7. Packs: $10, $25 suggested, $50, $100.");
+    expect(missing.stderr).toBe("✗ No PeopleBlade pack costs $7. Packs: $10 · $25 (suggested) · $50 · $100.\n→ peopleblade credits --help\n");
     expect(h.calls).toHaveLength(3);
   });
 
@@ -187,11 +192,11 @@ describe("topup", () => {
     expect((await state(h)).pendingClaim).toEqual({ id: CLAIM_ID, expiresAt: "2026-09-17T22:00:00Z" });
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe([
-      `Add PeopleBlade credits: ${ORIGIN}/t/${CLAIM_ID}`,
-      "Packs: $10 = 1000 credits; $25 = 2500 + 150 bonus credits (suggested); $50 = 5000 + 500 bonus credits; $100 = 10000 + 1500 bonus credits.",
-      "The link is valid until 2026-09-17T22:00:00Z. After paying, run peopleblade credits wait or rerun your command.",
-      "Not at this terminal? peopleblade credits email --to <address>",
-      "Current balance: $0.10 (10 credits).",
+      `→ Add PeopleBlade credits: ${ORIGIN}/t/${CLAIM_ID}`,
+      "  Packs: $10 = 1000 credits; $25 = 2500 + 150 bonus credits (suggested); $50 = 5000 + 500 bonus credits; $100 = 10000 + 1500 bonus credits.",
+      "  The link is valid for 23 hours, until 10:00 PM. After you pay, run peopleblade credits wait or rerun your command.",
+      "  Not at this computer? Email yourself the link: peopleblade credits email --to <address>",
+      "  Current balance: $0.10.",
     ].join("\n") + "\n");
   });
 
@@ -220,7 +225,10 @@ describe("email", () => {
     const result = await run(h, ["email", "--to", "reader@example.com"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('{"sentTo":"reader@example.com"}\n');
-    expect(result.stderr).toBe("Sent the PeopleBlade credits link to reader@example.com.\n");
+    expect(result.stderr).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
+    const person = await runCreditsCommand(profile, ["email", "--to", "reader@example.com"], { ...h.io, audience: "human" });
+    expect(person.stdout).toBe("");
+    expect(person.stderr).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
     expect(h.calls[0]!.headers.authorization).toBe(`Bearer ${CLAIM_SECRET}`);
     expect(h.calls[0]!.body).toEqual({ to: "reader@example.com" });
     const quiet = await run(h, ["email", "--to", "reader@example.com", "--json"]);
@@ -288,12 +296,14 @@ describe("wait", () => {
   test("human mode announces the wait and the result", async () => {
     const h = await setup({ "GET /v1/claims/clm_8f3k2q": reply(200, PAID) });
     await seed(h, { pendingClaim: PENDING });
-    const result = await run(h, ["wait"]);
+    const result = await runCreditsCommand(profile, ["wait"], { ...h.io, audience: "human" });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe([
-      `Waiting for payment at ${ORIGIN}/t/${CLAIM_ID} (polling every 5 s for up to 15m; link valid until 2026-09-17T22:00:00Z).`,
-      "Paid. PeopleBlade balance: $26.50 (2650 credits). This device is now signed in.",
+      `↻ Waiting for payment at ${ORIGIN}/t/${CLAIM_ID}`,
+      "  Checking every 5 seconds for up to 15m. Press Ctrl-C to stop; paying still works.",
+      "✓ Payment received. PeopleBlade balance: $26.50.",
+      "Next: rerun your command",
     ].join("\n") + "\n");
   });
 
@@ -356,7 +366,7 @@ describe("wait", () => {
     const result = await run(h, ["wait"]);
     expect(result.exitCode).toBe(0);
     expect(h.calls[0]!.headers.authorization).toBe(`Bearer ${DEVICE_TOKEN}`);
-    expect(result.stderr).toContain("Paid. PeopleBlade balance: $26.50 (2650 credits).\n");
+    expect(result.stderr).toBe("✓ Payment received. PeopleBlade balance: $26.50.\n");
     expect(result.stderr).not.toContain("signed in");
     const saved = await state(h);
     expect(saved.token).toBe(DEVICE_TOKEN);
@@ -441,13 +451,13 @@ describe("signout", () => {
     const result = await run(h, ["signout"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('{"signedOut":true}\n');
-    expect(result.stderr).toBe("Forgot the PeopleBlade credits token on this device.\n");
+    expect(result.stderr).toBe("✓ Signed out of PeopleBlade credits on this device. Your balance stays with your account.\n");
     expect(await state(h)).toEqual({ schemaVersion: "hraness-credits-state-v1", product: "peopleblade", deviceId: DEVICE_ID, pendingClaim: PENDING });
     const again = await run(h, ["signout", "--json"]);
     expect(again.exitCode).toBe(0);
     expect(again.stderr).toBe("");
     const fresh = await setup();
-    expect((await run(fresh, ["signout"])).stderr).toContain("No PeopleBlade credits token");
+    expect((await run(fresh, ["signout"])).stderr).toBe("○ PeopleBlade credits weren't signed in on this device.\n");
     expect(h.calls).toHaveLength(0);
   });
 });

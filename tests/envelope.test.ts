@@ -49,14 +49,18 @@ describe("required envelope", () => {
     expect(() => buildCreditsRequiredEnvelope({ ...input, command: [] })).toThrow(TypeError);
   });
 
-  test("human rendering is four lines with cost, link, resume and email", () => {
-    const text = renderCreditsRequiredForHuman(buildCreditsRequiredEnvelope(requiredInput()));
+  test("human rendering is five lines with cost, link, packs, resume and email", () => {
+    const now = Date.parse("2026-09-16T22:00:00Z");
+    const text = renderCreditsRequiredForHuman(buildCreditsRequiredEnvelope(requiredInput()), { now, timeZone: "UTC" });
     expect(text).toBe([
-      "PeopleBlade needs $12.50 in credits for enrich_contact; this device has $0.00.",
-      "Add credits: https://credits.hraness.com/t/clm_8f3k2q (valid until 2026-09-17T22:00:00Z; packs $10, $25 suggested).",
-      "After payment, rerun peopleblade cloud enrich --list founders or run peopleblade credits wait; the work resumes.",
-      "Not at this terminal? Email the link: peopleblade credits email --to <address>",
+      "PeopleBlade needs $12.50 in credits for enrich contact. This device has $0.00.",
+      "Add credits: https://credits.hraness.com/t/clm_8f3k2q",
+      "Packs: $10 · $25 (suggested). The link is valid for 24 hours, until 10:00 PM.",
+      "After you pay, rerun peopleblade cloud enrich --list founders and the work picks up where it stopped.",
+      "Not at this computer? Email yourself the link: peopleblade credits email --to <address>",
     ].join("\n") + "\n");
+    expect(renderCreditsRequiredForHuman(buildCreditsRequiredEnvelope(requiredInput()), { now, timeZone: "UTC", operationLabel: "Contact enrichment" }))
+      .toStartWith("PeopleBlade needs $12.50 in credits for Contact enrichment. ");
     const lines = text.trimEnd().split("\n");
     expect(lines.length >= 3 && lines.length <= 5).toBe(true);
   });
@@ -64,7 +68,7 @@ describe("required envelope", () => {
   test("human rendering without automatic resume", () => {
     const input = requiredInput();
     const text = renderCreditsRequiredForHuman(buildCreditsRequiredEnvelope({ ...input, resume: { argv: ["peopleblade", "enrich", "a b"], automatic: false } }));
-    expect(text).toContain("After payment, run peopleblade credits wait, then rerun peopleblade enrich 'a b'.");
+    expect(text).toContain("After you pay, run peopleblade credits wait, then rerun peopleblade enrich 'a b'.");
     expect(() => renderCreditsRequiredForHuman({ ...buildCreditsRequiredEnvelope(input), instructions: "open it" } as never)).toThrow(TypeError);
   });
 

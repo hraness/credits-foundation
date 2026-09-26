@@ -322,7 +322,10 @@ function parseMoney(value: unknown): CreditsMoney | null {
 }
 
 function parsePrice(value: unknown): CreditsPrice | null {
-  if (!shape(value, ["microUsd", "usd"]) || !isMicroUsd(value.microUsd) || !isUsdString(value.usd)) return null;
+  // The documented public unit price carries a display `credits` alongside
+  // microUsd and usd; clients project the two contract fields only.
+  if (!shape(value, ["microUsd", "usd"], ["credits"]) || !isMicroUsd(value.microUsd) || !isUsdString(value.usd)
+    || (value.credits !== undefined && !isCredits(value.credits))) return null;
   return Object.freeze({ microUsd: value.microUsd, usd: value.usd });
 }
 

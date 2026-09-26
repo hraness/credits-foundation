@@ -33,7 +33,9 @@ export const rateCard = {
   minUsd: 10,
   maxUsd: 500,
   operations: {
-    enrich_contact: { label: "contact enrichment", unitPrice: { microUsd: 200000, usd: "0.20" } },
+    // The service emits the documented three-key money view on unit prices;
+    // the parser accepts `credits` and projects the two contract fields only.
+    enrich_contact: { label: "contact enrichment", unitPrice: { credits: 20, microUsd: 200000, usd: "0.20" } },
     model_tokens: { label: "AI processing" },
   },
 };

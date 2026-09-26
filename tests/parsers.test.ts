@@ -88,6 +88,9 @@ describe("parsers", () => {
     expect(parseCreditsRateCard({ ...rateCard, operations: { "Bad Name": { label: "x" } } })).toBeNull();
     expect(parseCreditsRateCard({ ...rateCard, operations: JSON.parse('{"__proto__":{"label":"x"}}') })).toBeNull();
     expect(parseCreditsRateCard({ ...rateCard, operations: { a: { label: "x", unitPrice: { microUsd: 1 } } } })).toBeNull();
+    expect(parseCreditsRateCard({ ...rateCard, operations: { a: { label: "x", unitPrice: { credits: 20, microUsd: 200000, usd: "0.20" } } } })!.operations.a!.unitPrice).toEqual({ microUsd: 200000, usd: "0.20" });
+    expect(parseCreditsRateCard({ ...rateCard, operations: { a: { label: "x", unitPrice: { credits: "20", microUsd: 200000, usd: "0.20" } } } })).toBeNull();
+    expect(parseCreditsRateCard({ ...rateCard, operations: { a: { label: "x", unitPrice: { credits: 20, microUsd: 200000, usd: "0.20", junk: 1 } } } })).toBeNull();
     expect(parseCreditsRateCard({ ...rateCard, operations: { a: { label: "x", takeRate: 0.3 } } })).toBeNull();
     expect(parseCreditsRateCard({ ...rateCard, minUsd: "10" })).toBeNull();
     const many = Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`op${i}`, { label: "x" }]));

@@ -390,9 +390,17 @@ function holdStreamGuard(sink: CreditsOutput): StreamGuard {
   if (guard === undefined) {
     const waiters = new Set<(ok: boolean) => void>();
     const created: StreamGuard = { holds: 0, waiters, onEvent: () => { for (const waiter of [...waiters]) waiter(false); } };
+    // Attach both listeners before sharing the guard: if `on` throws, no
+    // later write may reuse a guard that has no `error` listener.
+    try {
+      sink.on!("error", created.onEvent);
+      sink.on!("close", created.onEvent);
+    } catch (error) {
+      try { sink.removeListener?.("error", created.onEvent); } catch { /* Best effort. */ }
+      try { sink.removeListener?.("close", created.onEvent); } catch { /* Best effort. */ }
+      throw error;
+    }
     streamGuards.set(sink, created);
-    sink.on!("error", created.onEvent);
-    sink.on!("close", created.onEvent);
     guard = created;
   }
   guard.holds += 1;

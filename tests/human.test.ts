@@ -165,6 +165,25 @@ describe("audience and terminals", () => {
 
 describe("emitCreditsRequired audience default", () => {
   const envelope = buildCreditsRequiredEnvelope(requiredInput());
+  test("a sink whose on() fails once still gets an error listener on the next write", async () => {
+    const listeners = new Map<string, number>();
+    let failNext = true;
+    const stream = {
+      isTTY: false,
+      write(_text: string, callback?: (error?: Error | null) => void) { callback?.(null); return true; },
+      on(event: string) {
+        if (failNext) { failNext = false; throw new Error("torn down"); }
+        listeners.set(event, (listeners.get(event) ?? 0) + 1);
+        return stream;
+      },
+      removeListener(event: string) { listeners.set(event, (listeners.get(event) ?? 1) - 1); return stream; },
+    };
+    expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(false);
+    const second = emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent");
+    expect(listeners.get("error")).toBe(1);
+    expect(await second).toBe(true);
+  });
+
   test("back-to-back writes to one Node-style stream both land", async () => {
     // Like process.stderr: a write callback plus error/close listeners.
     const writes: string[] = [];

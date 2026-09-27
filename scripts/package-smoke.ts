@@ -201,7 +201,8 @@ process.stdout.write(JSON.stringify({ emitted, exitCode: result.exitCode, stdout
     child.on("close", resolvePromise);
   }).finally(() => clearTimeout(timer));
   assert.equal(code, 0, "a real closed stderr pipe must not crash the installed Node host");
-  assert.deepEqual(JSON.parse(stdout), { emitted: false, exitCode: 0, stdout: "" });
+  // The status sentence is the result, so it lands on stdout even with stderr closed (ASCII: no UTF-8 locale).
+  assert.deepEqual(JSON.parse(stdout), { emitted: false, exitCode: 0, stdout: "o No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n" });
   const browser = await Bun.build({ entrypoints: [join(installed, "dist/index.js")], target: "browser" });
   if (!browser.success) throw new Error("Root must remain browser portable.");
   const browserRecovery = join(scratch, "browser-recovery.mjs");

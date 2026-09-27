@@ -70,7 +70,9 @@ export declare function readStoredDeviceToken(profile: CreditsProductProfile, op
  */
 export declare function emitCreditsRequired(envelope: CreditsRequiredEnvelope, io?: Pick<CreditsCommandIo, "stderr" | "env">, audience?: CreditsAudience, options?: CreditsHumanOptions): Promise<boolean>;
 /**
- * Run one `credits` subcommand. JSON goes to stdout only; human text goes to stderr. Network happens only
+ * Run one `credits` subcommand. The result (JSON or text) goes to stdout; errors, progress and the `Next:`
+ * hint go to stderr. `email` and `signout` print JSON on stdout unless stdout is a person's terminal, and
+ * then put their sentence on stderr. Network happens only
  * inside the commands the table marks as such. Exit codes: 0 success; 1 state unavailable, busy, or service
  * unreachable; 2 usage error, invalid id, or expired claim; 3 payment still required after `wait` timed out.
  */

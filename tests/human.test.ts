@@ -40,6 +40,8 @@ describe("detectCreditsAudience", () => {
     expect(detectCreditsAudience({ env: { HRANESS_AUDIENCE: "agent" }, stderr: tty })).toBe("agent");
     expect(detectCreditsAudience({ env: { HRANESS_AUDIENCE: "off" }, stderr: tty })).toBe("quiet");
     expect(detectCreditsAudience({ env: { HRANESS_AUDIENCE: "robot" }, stderr: tty })).toBe("human");
+    // The shared desktop-foundation rule ignores case and surrounding spaces.
+    expect(detectCreditsAudience({ env: { HRANESS_AUDIENCE: " Agent " }, stderr: pipe })).toBe("agent");
   });
 });
 
@@ -100,8 +102,9 @@ describe("audience and terminals", () => {
     expect(JSON.parse(agent.stdout)).toEqual(JSON.parse(JSON.stringify(parseCreditsStatus(statusResponse()))));
     expect(agent.stderr).toBe("");
     const person = await runCreditsCommand(profile, ["status"], { ...h.io, audience: "human" });
-    expect(person.stdout).toBe("");
-    expect(person.stderr).toStartWith("● PeopleBlade credits: $8.10");
+    // The result is on stdout, so `status | grep` works; stderr stays for errors and hints.
+    expect(person.stderr).toBe("");
+    expect(person.stdout).toStartWith("● PeopleBlade credits: $8.10");
     const failure = await runCreditsCommand(profile, ["bogus"], { ...h.io, audience: "agent" });
     expect(failure.exitCode).toBe(2);
     expect(JSON.parse(failure.stdout)).toMatchObject({ error: "usage_error" });
@@ -112,11 +115,14 @@ describe("audience and terminals", () => {
     const sink = (isTTY: boolean) => ({ isTTY, write: () => true });
     await signIn(h);
     const person = await runCreditsCommand(profile, ["signout"], { ...h.io, audience: "human", stdout: sink(true) });
-    expect(person.stdout).toBe("");
+    expect(person.stdout).toBe("✓ Signed out of PeopleBlade credits on this device. Your balance stays with your account.\n");
+    expect(person.stderr).toBe("");
     await signIn(h);
     // A person capturing stdout, as in out=$(peopleblade credits signout), still gets JSON.
     const captured = await runCreditsCommand(profile, ["signout"], { ...h.io, audience: "human", stdout: sink(false) });
     expect(captured.stdout).toBe('{"signedOut":true}\n');
+    // The sentence moves to stderr so stdout stays one JSON document.
+    expect(captured.stderr).toBe("✓ Signed out of PeopleBlade credits on this device. Your balance stays with your account.\n");
     const pipe = await runCreditsCommand(profile, ["signout"], h.io);
     expect(pipe.stdout).toBe('{"signedOut":true}\n');
   });
@@ -139,10 +145,10 @@ describe("audience and terminals", () => {
     const h = await setup();
     const run = (env: Record<string, string>) => runCreditsCommand(profile, ["status"], { ...h.io, env: { XDG_STATE_HOME: h.home, ...env } });
     const expected = "○ No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n";
-    expect((await run({ LANG: "en_US.UTF-8", NO_COLOR: "1" })).stderr).toBe(expected);
-    expect((await run({ LANG: "en_US.UTF-8", TERM: "dumb" })).stderr).toBe(expected.replace("○", "o"));
-    expect((await run({ LC_ALL: "C", LANG: "en_US.UTF-8" })).stderr).toBe(expected.replace("○", "o"));
-    expect((await run({ LANG: "en_US.UTF-8", HRANESS_ASCII: "1" })).stderr).toBe(expected.replace("○", "o"));
+    expect((await run({ LANG: "en_US.UTF-8", NO_COLOR: "1" })).stdout).toBe(expected);
+    expect((await run({ LANG: "en_US.UTF-8", TERM: "dumb" })).stdout).toBe(expected.replace("○", "o"));
+    expect((await run({ LC_ALL: "C", LANG: "en_US.UTF-8" })).stdout).toBe(expected.replace("○", "o"));
+    expect((await run({ LANG: "en_US.UTF-8", HRANESS_ASCII: "1" })).stdout).toBe(expected.replace("○", "o"));
     const unknown = await runCreditsCommand(profile, ["nope"], { ...h.io, env: { XDG_STATE_HOME: h.home } });
     expect(unknown.stderr).toBe('FAIL Unknown credits command "nope".\n-> peopleblade credits --help\n');
     expect(unknown.stderr).not.toMatch(/\u001b\[/u);
@@ -153,7 +159,7 @@ describe("audience and terminals", () => {
     disposers.push(low.dispose);
     await signIn(low);
     const result = await runCreditsCommand(profile, ["status"], low.io);
-    expect(result.stderr.split("\n")[0]).toBe("⚠ PeopleBlade credits: $8.10. Your balance is low.");
+    expect(result.stdout.split("\n")[0]).toBe("⚠ PeopleBlade credits: $8.10. Your balance is low.");
   });
 });
 

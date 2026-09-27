@@ -420,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.5.0";
+var CREDITS_FOUNDATION_VERSION = "0.6.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -936,6 +936,27 @@ function creditsMenuItems(status, options = {}) {
   return Object.freeze([row, add]);
 }
 
+// node_modules/@hraness/desktop-foundation/dist/src/audience.js
+var AGENT_MARKERS = [
+  "AI_AGENT",
+  "CLAUDECODE",
+  "CODEX_SANDBOX",
+  "CODEX_SANDBOX_NETWORK_DISABLED",
+  "CURSOR_AGENT",
+  "GEMINI_CLI"
+];
+function detectAudience(input = {}) {
+  const env = input.env ?? process.env;
+  const override = env.HRANESS_AUDIENCE?.trim().toLowerCase();
+  if (override === "human" || override === "agent" || override === "quiet")
+    return override;
+  if (override === "off")
+    return "quiet";
+  if (AGENT_MARKERS.some((name) => (env[name] ?? "") !== ""))
+    return "agent";
+  return input.stderrIsTTY ?? process.stderr.isTTY === true ? "human" : "quiet";
+}
+
 // src/node.ts
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -1067,18 +1088,9 @@ var HELP = [
   "  {command} credits topup --usd 25"
 ].join(`
 `);
-var AGENT_MARKERS = ["AI_AGENT", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CURSOR_AGENT", "GEMINI_CLI"];
 var ASCII_SYMBOLS = Object.freeze({ "✓": "OK", "✗": "FAIL", "→": "->", "↻": "...", "●": "*", "○": "o", "⚠": "WARN" });
 function detectCreditsAudience(options = {}) {
-  const env = options.env ?? process.env;
-  const shared = env.HRANESS_AUDIENCE;
-  if (shared === "human" || shared === "agent" || shared === "quiet")
-    return shared;
-  if (shared === "off")
-    return "quiet";
-  if (AGENT_MARKERS.some((name) => (env[name] ?? "") !== ""))
-    return "agent";
-  return (options.stderr ?? process.stderr).isTTY === true ? "human" : "quiet";
+  return detectAudience({ env: options.env ?? process.env, stderrIsTTY: (options.stderr ?? process.stderr).isTTY === true });
 }
 function asciiOnly(env) {
   if (env.HRANESS_ASCII === "1" || env.TERM === "dumb")
@@ -1899,10 +1911,13 @@ async function runCreditsCommand(profile, argv = [], io = {}) {
     await emitter.out(outcome.help);
   } else {
     const stdoutIsTerminal = (io.stdout === undefined ? process.stdout.isTTY : io.stdout.isTTY) === true;
-    if (wantsJson || outcome.jsonAlways === true && !(audience === "human" && stdoutIsTerminal))
+    const jsonOnStdout = wantsJson || outcome.jsonAlways === true && !(audience === "human" && stdoutIsTerminal);
+    if (jsonOnStdout)
       await emitter.out(json(outcome.json));
-    if (!wantsJson && outcome.human !== "")
-      await emitter.err(symbols(outcome.human, env));
+    if (!wantsJson && outcome.human !== "") {
+      const text2 = symbols(outcome.human, env);
+      await (jsonOnStdout ? emitter.err(text2) : emitter.out(text2));
+    }
     if (!wantsJson && audience === "human" && outcome.next !== undefined)
       await emitter.err(`Next: ${outcome.next}
 `);

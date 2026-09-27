@@ -1,3 +1,4 @@
+import { detectAudience } from "@hraness/desktop-foundation/audience";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
@@ -45,10 +46,6 @@ const HELP = [
   "  {command} credits topup --usd 25",
 ].join("\n");
 
-// TODO(df-0.8): use detectAudience from @hraness/desktop-foundation. This copy
-// follows the shared Hraness CLI contract verbatim, because this package must
-// not depend on desktop-foundation. Only exact names count as agent markers.
-const AGENT_MARKERS = ["AI_AGENT", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CURSOR_AGENT", "GEMINI_CLI"] as const;
 const ASCII_SYMBOLS: Readonly<Record<string, string>> = Object.freeze({ "✓": "OK", "✗": "FAIL", "→": "->", "↻": "...", "●": "*", "○": "o", "⚠": "WARN" });
 
 export interface CreditsOutput {
@@ -103,12 +100,8 @@ export type CreditsAudience = "agent" | "human" | "quiet";
  * value, then `human` when stderr is a terminal, otherwise `quiet`.
  */
 export function detectCreditsAudience(options: { env?: Readonly<Record<string, string | undefined>>; stderr?: { readonly isTTY?: boolean } } = {}): CreditsAudience {
-  const env = options.env ?? process.env;
-  const shared = env.HRANESS_AUDIENCE;
-  if (shared === "human" || shared === "agent" || shared === "quiet") return shared;
-  if (shared === "off") return "quiet";
-  if (AGENT_MARKERS.some(name => (env[name] ?? "") !== "")) return "agent";
-  return (options.stderr ?? process.stderr).isTTY === true ? "human" : "quiet";
+  // `detectAudience` from desktop-foundation 0.8; the build bundles it, so installs need no extra package.
+  return detectAudience({ env: (options.env ?? process.env) as NodeJS.ProcessEnv, stderrIsTTY: (options.stderr ?? process.stderr).isTTY === true });
 }
 
 function asciiOnly(env: Readonly<Record<string, string | undefined>>): boolean {
@@ -920,7 +913,9 @@ function helpText(context: Context): string {
 }
 
 /**
- * Run one `credits` subcommand. JSON goes to stdout only; human text goes to stderr. Network happens only
+ * Run one `credits` subcommand. The result (JSON or text) goes to stdout; errors, progress and the `Next:`
+ * hint go to stderr. `email` and `signout` print JSON on stdout unless stdout is a person's terminal, and
+ * then put their sentence on stderr. Network happens only
  * inside the commands the table marks as such. Exit codes: 0 success; 1 state unavailable, busy, or service
  * unreachable; 2 usage error, invalid id, or expired claim; 3 payment still required after `wait` timed out.
  */
@@ -974,10 +969,15 @@ export async function runCreditsCommand(
   } else if (outcome.help !== undefined) {
     await emitter.out(outcome.help);
   } else {
-    // `email` and `signout` keep JSON on stdout for scripts and captures, but not on a person's terminal.
+    // The result goes to stdout. `email` and `signout` keep JSON there for scripts and
+    // captures (not on a person's terminal); their sentence then moves to stderr.
     const stdoutIsTerminal = (io.stdout === undefined ? process.stdout.isTTY : io.stdout.isTTY) === true;
-    if (wantsJson || (outcome.jsonAlways === true && !(audience === "human" && stdoutIsTerminal))) await emitter.out(json(outcome.json));
-    if (!wantsJson && outcome.human !== "") await emitter.err(symbols(outcome.human, env));
+    const jsonOnStdout = wantsJson || (outcome.jsonAlways === true && !(audience === "human" && stdoutIsTerminal));
+    if (jsonOnStdout) await emitter.out(json(outcome.json));
+    if (!wantsJson && outcome.human !== "") {
+      const text = symbols(outcome.human, env);
+      await (jsonOnStdout ? emitter.err(text) : emitter.out(text));
+    }
     if (!wantsJson && audience === "human" && outcome.next !== undefined) await emitter.err(`Next: ${outcome.next}\n`);
   }
   return { exitCode: outcome.exitCode, stdout: emitter.stdout, stderr: emitter.stderr };

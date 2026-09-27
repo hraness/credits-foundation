@@ -16,6 +16,10 @@ the protocol and exit codes are unchanged.
   bundled into `dist`. `HRANESS_AUDIENCE` also accepts any letter case and
   surrounding spaces.
 
+- Two writes in a row to the same stream no longer drop the second one. A
+  host that ran two `credits` commands back to back on `process.stdout`, or a
+  result followed by a hint on one stream, could lose the second write.
+
 For consumers: if a test or wrapper reads the human text of a `credits`
 command from stderr, read stdout instead. Code that uses `--json`, a detected
 agent, or `emitCreditsRequired` needs no change.

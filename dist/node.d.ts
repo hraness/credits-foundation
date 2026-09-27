@@ -41,9 +41,11 @@ export interface CreditsCommandResult {
 /** Who reads the output: a person at a terminal, a detected agent, or nobody known (plain text, no hints). */
 export type CreditsAudience = "agent" | "human" | "quiet";
 /**
- * The shared Hraness audience rule: `HRANESS_AUDIENCE` (`human`, `agent`,
- * `quiet`, or `off` = quiet), then any exact agent marker set to a nonempty
- * value, then `human` when stderr is a terminal, otherwise `quiet`.
+ * The shared Hraness audience rule (desktop-foundation's `detectAudience`):
+ * `HRANESS_AUDIENCE` (`human`, `agent`, `quiet`, or `off` = quiet, in any
+ * letter case and ignoring surrounding spaces), then any exact agent marker
+ * name set to a nonempty value, then `human` when stderr is a terminal,
+ * otherwise `quiet`.
  */
 export declare function detectCreditsAudience(options?: {
     env?: Readonly<Record<string, string | undefined>>;

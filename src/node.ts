@@ -95,9 +95,11 @@ export interface CreditsCommandResult {
 export type CreditsAudience = "agent" | "human" | "quiet";
 
 /**
- * The shared Hraness audience rule: `HRANESS_AUDIENCE` (`human`, `agent`,
- * `quiet`, or `off` = quiet), then any exact agent marker set to a nonempty
- * value, then `human` when stderr is a terminal, otherwise `quiet`.
+ * The shared Hraness audience rule (desktop-foundation's `detectAudience`):
+ * `HRANESS_AUDIENCE` (`human`, `agent`, `quiet`, or `off` = quiet, in any
+ * letter case and ignoring surrounding spaces), then any exact agent marker
+ * name set to a nonempty value, then `human` when stderr is a terminal,
+ * otherwise `quiet`.
  */
 export function detectCreditsAudience(options: { env?: Readonly<Record<string, string | undefined>>; stderr?: { readonly isTTY?: boolean } } = {}): CreditsAudience {
   // `detectAudience` from desktop-foundation 0.8; the build bundles it, so installs need no extra package.
@@ -380,10 +382,13 @@ async function writeOutput(sink: CreditsOutput, message: string): Promise<boolea
     let settled = false;
     let timer: ReturnType<typeof setTimeout>;
     const stream = typeof sink.on === "function" && typeof sink.removeListener === "function";
+    const release = () => {
+      if (pendingOutputs.get(sink) === operation) pendingOutputs.delete(sink);
+    };
     const cleanup = () => {
       try { sink.removeListener?.("error", onError); } catch { /* Host output cleanup is best effort. */ }
       try { sink.removeListener?.("close", onClose); } catch { /* Preserve the command result. */ }
-      if (pendingOutputs.get(sink) === operation) pendingOutputs.delete(sink);
+      release();
     };
     const settle = (ok: boolean) => {
       if (settled) return;
@@ -393,6 +398,9 @@ async function writeOutput(sink: CreditsOutput, message: string): Promise<boolea
     };
     const finished = (ok: boolean) => {
       settle(ok);
+      // The write is done, so the next write to this sink may start at once;
+      // deferring this dropped a second write that followed right after.
+      release();
       // Node invokes failed-write callbacks before emitting `error`. Keep the
       // listener through that turn so a broken pipe cannot escape this call.
       if (stream) setTimeout(cleanup, 0).unref();

@@ -165,6 +165,20 @@ describe("audience and terminals", () => {
 
 describe("emitCreditsRequired audience default", () => {
   const envelope = buildCreditsRequiredEnvelope(requiredInput());
+  test("back-to-back writes to one Node-style stream both land", async () => {
+    // Like process.stderr: a write callback plus error/close listeners.
+    const writes: string[] = [];
+    const stream = {
+      isTTY: false,
+      write(text: string, callback?: (error?: Error | null) => void) { writes.push(text); callback?.(null); return true; },
+      on() { return stream; },
+      removeListener() { return stream; },
+    };
+    expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(true);
+    expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(true);
+    expect(writes).toHaveLength(2);
+  });
+
   const capture = (isTTY: boolean) => {
     const writes: string[] = [];
     return { writes, stderr: { isTTY, write(text: string) { writes.push(text); return true; } } };

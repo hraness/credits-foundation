@@ -189,7 +189,9 @@ const envelope = buildCreditsRequiredEnvelope(${requiredInput});
 const emitted = await emitCreditsRequired(envelope, { stderr: process.stderr }, 'human');
 const profile = { id: 'peopleblade', name: 'PeopleBlade', command: ['peopleblade'] };
 const result = await runCreditsCommand(profile, ['status'], { env: { XDG_STATE_HOME: ${JSON.stringify(join(scratch, "broken-pipe-state"))} }, stderr: process.stderr, fetch: async () => { throw new Error('offline'); } });
-process.stdout.write(JSON.stringify({ emitted, exitCode: result.exitCode, stdout: result.stdout }));
+// A usage error writes only to the closed stderr; it must still return its exit code.
+const usage = await runCreditsCommand(profile, ['bogus'], { env: {}, stderr: process.stderr, audience: 'human' });
+process.stdout.write(JSON.stringify({ emitted, exitCode: result.exitCode, stdout: result.stdout, usageExitCode: usage.exitCode, usageStdout: usage.stdout }));
 `);
   const child = spawn("node", [brokenPipe], { cwd: scratch, stdio: ["ignore", "pipe", "pipe"] });
   child.stderr.destroy();
@@ -202,7 +204,7 @@ process.stdout.write(JSON.stringify({ emitted, exitCode: result.exitCode, stdout
   }).finally(() => clearTimeout(timer));
   assert.equal(code, 0, "a real closed stderr pipe must not crash the installed Node host");
   // The status sentence is the result, so it lands on stdout even with stderr closed (ASCII: no UTF-8 locale).
-  assert.deepEqual(JSON.parse(stdout), { emitted: false, exitCode: 0, stdout: "o No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n" });
+  assert.deepEqual(JSON.parse(stdout), { emitted: false, exitCode: 0, stdout: "o No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n", usageExitCode: 2, usageStdout: "" });
   const browser = await Bun.build({ entrypoints: [join(installed, "dist/index.js")], target: "browser" });
   if (!browser.success) throw new Error("Root must remain browser portable.");
   const browserRecovery = join(scratch, "browser-recovery.mjs");

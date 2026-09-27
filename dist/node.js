@@ -1290,6 +1290,10 @@ async function writeOutput(sink, message) {
     let settled = false;
     let timer;
     const stream = typeof sink.on === "function" && typeof sink.removeListener === "function";
+    const release = () => {
+      if (pendingOutputs.get(sink) === operation)
+        pendingOutputs.delete(sink);
+    };
     const cleanup = () => {
       try {
         sink.removeListener?.("error", onError);
@@ -1297,8 +1301,7 @@ async function writeOutput(sink, message) {
       try {
         sink.removeListener?.("close", onClose);
       } catch {}
-      if (pendingOutputs.get(sink) === operation)
-        pendingOutputs.delete(sink);
+      release();
     };
     const settle = (ok) => {
       if (settled)
@@ -1309,6 +1312,7 @@ async function writeOutput(sink, message) {
     };
     const finished = (ok) => {
       settle(ok);
+      release();
       if (stream)
         setTimeout(cleanup, 0).unref();
       else

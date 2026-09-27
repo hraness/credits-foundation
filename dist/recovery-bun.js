@@ -454,7 +454,9 @@ function parseCreditsRateCard(value) {
   const operations2 = {};
   for (const name of names) {
     const operation = value.operations[name];
-    if (!isCreditsOperation(name) || !shape(operation, ["label"], ["unitPrice"]) || !plainText(operation.label, 80))
+    if (!isCreditsOperation(name) || !shape(operation, ["label"], ["unitPrice", "noun"]) || !plainText(operation.label, 80))
+      return null;
+    if (operation.noun !== undefined && (!shape(operation.noun, ["one", "other"]) || !plainText(operation.noun.one, 40) || !plainText(operation.noun.other, 40)))
       return null;
     const unitPrice = operation.unitPrice === undefined ? undefined : parsePrice(operation.unitPrice);
     if (unitPrice === null || unitPrice !== undefined && unitPrice.microUsd < 0)

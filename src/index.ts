@@ -454,7 +454,9 @@ export function parseCreditsRateCard(value: unknown): CreditsRateCard | null {
   const operations: Record<string, CreditsRateCardOperation> = {};
   for (const name of names) {
     const operation = value.operations[name];
-    if (!isCreditsOperation(name) || !shape(operation, ["label"], ["unitPrice"]) || !plainText(operation.label, 80)) return null;
+    if (!isCreditsOperation(name) || !shape(operation, ["label"], ["unitPrice", "noun"]) || !plainText(operation.label, 80)) return null;
+    if (operation.noun !== undefined
+      && (!shape(operation.noun, ["one", "other"]) || !plainText(operation.noun.one, 40) || !plainText(operation.noun.other, 40))) return null;
     const unitPrice = operation.unitPrice === undefined ? undefined : parsePrice(operation.unitPrice);
     if (unitPrice === null || (unitPrice !== undefined && unitPrice.microUsd < 0)) return null;
     operations[name] = Object.freeze({ label: operation.label, ...(unitPrice === undefined ? {} : { unitPrice }) });

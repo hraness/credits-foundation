@@ -84,8 +84,8 @@ describe("status", () => {
     });
     expect(result.stderr).toBe("");
     const human = await run(h, ["status"]);
-    expect(human.stdout).toBe("");
-    expect(human.stderr).toBe("○ No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n");
+    expect(human.stderr).toBe("");
+    expect(human.stdout).toBe("○ No PeopleBlade credits on this device yet. Add some: peopleblade credits topup\n");
     expect(h.calls).toHaveLength(0);
   });
 
@@ -102,8 +102,8 @@ describe("status", () => {
     });
     expect(h.calls[0]!.url).toBe(`${ORIGIN}/v1/balance`);
     const human = await run(h, ["status"]);
-    expect(human.stdout).toBe("");
-    expect(human.stderr).toBe([
+    expect(human.stderr).toBe("");
+    expect(human.stdout).toBe([
       "● PeopleBlade credits: $8.10, $0.50 held for work in progress.",
       "  Account: reader@example.com",
       "  Last operation cost $0.20.",
@@ -190,8 +190,8 @@ describe("topup", () => {
     expect(result.exitCode).toBe(0);
     expect(h.calls[0]!.body).toEqual({ product: "peopleblade", device: { id: DEVICE_ID, label: "test-device" }, subjectToken: DEVICE_TOKEN, email: "reader@example.com" });
     expect((await state(h)).pendingClaim).toEqual({ id: CLAIM_ID, expiresAt: "2026-09-17T22:00:00Z" });
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe([
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe([
       `→ Add PeopleBlade credits: ${ORIGIN}/t/${CLAIM_ID}`,
       "  Packs: $10 = 1000 credits; $25 = 2500 + 150 bonus credits (suggested); $50 = 5000 + 500 bonus credits; $100 = 10000 + 1500 bonus credits.",
       "  The link is valid for 23 hours, until 10:00 PM. After you pay, run peopleblade credits wait or rerun your command.",
@@ -227,8 +227,8 @@ describe("email", () => {
     expect(result.stdout).toBe('{"sentTo":"reader@example.com"}\n');
     expect(result.stderr).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
     const person = await runCreditsCommand(profile, ["email", "--to", "reader@example.com"], { ...h.io, audience: "human", stdout: { isTTY: true, write: () => true } });
-    expect(person.stdout).toBe("");
-    expect(person.stderr).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
+    expect(person.stderr).toBe("");
+    expect(person.stdout).toBe("✓ Sent the PeopleBlade credits link to reader@example.com.\n");
     expect(h.calls[0]!.headers.authorization).toBe(`Bearer ${CLAIM_SECRET}`);
     expect(h.calls[0]!.body).toEqual({ to: "reader@example.com" });
     const quiet = await run(h, ["email", "--to", "reader@example.com", "--json"]);
@@ -298,11 +298,11 @@ describe("wait", () => {
     await seed(h, { pendingClaim: PENDING });
     const result = await runCreditsCommand(profile, ["wait"], { ...h.io, audience: "human" });
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("");
+    // Progress and the hint go to stderr; the result goes to stdout.
+    expect(result.stdout).toBe("✓ Payment received. PeopleBlade balance: $26.50.\n");
     expect(result.stderr).toBe([
       `↻ Waiting for payment at ${ORIGIN}/t/${CLAIM_ID}`,
       "  Checking every 5 seconds for up to 15m. Press Ctrl-C to stop; paying still works.",
-      "✓ Payment received. PeopleBlade balance: $26.50.",
       "Next: rerun your command",
     ].join("\n") + "\n");
   });
@@ -366,8 +366,8 @@ describe("wait", () => {
     const result = await run(h, ["wait"]);
     expect(result.exitCode).toBe(0);
     expect(h.calls[0]!.headers.authorization).toBe(`Bearer ${DEVICE_TOKEN}`);
-    expect(result.stderr).toBe("✓ Payment received. PeopleBlade balance: $26.50.\n");
-    expect(result.stderr).not.toContain("signed in");
+    expect(result.stdout).toBe("✓ Payment received. PeopleBlade balance: $26.50.\n");
+    expect(result.stdout).not.toContain("signed in");
     const saved = await state(h);
     expect(saved.token).toBe(DEVICE_TOKEN);
     expect(saved.pendingClaim).toBeUndefined();
@@ -410,7 +410,8 @@ describe("estimate", () => {
     expect(h.calls[0]!.headers.authorization).toBeUndefined();
     expect((await state(h)).rateCard).toMatchObject({ fetchedAt: h.now() });
     const human = await run(h, ["estimate", "enrich_contact"]);
-    expect(human.stderr).toBe("PeopleBlade contact enrichment: $0.20 per unit; 1 unit = $0.20 (20 credits).\n");
+    expect(human.stdout).toBe("PeopleBlade contact enrichment: $0.20 per unit; 1 unit = $0.20 (20 credits).\n");
+    expect(human.stderr).toBe("");
     expect(h.calls).toHaveLength(1);
     h.io.sleep!(5 * 60_000);
     await run(h, ["estimate", "enrich_contact", "--json"]);
@@ -424,7 +425,7 @@ describe("estimate", () => {
     expect(JSON.parse(settlement.stdout)).toEqual({
       schemaVersion: "hraness-credits-estimate-v1", product: { id: "peopleblade", name: "PeopleBlade" }, operation: "model_tokens", label: "AI processing", units: 1, known: false,
     });
-    expect((await run(h, ["estimate", "model_tokens"])).stderr).toContain("priced at settlement");
+    expect((await run(h, ["estimate", "model_tokens"])).stdout).toContain("priced at settlement");
     const unknown = await run(h, ["estimate", "nothing", "--json"]);
     expect(unknown.exitCode).toBe(2);
     expect(JSON.parse(unknown.stdout)).toMatchObject({ error: "unknown_operation", message: expect.stringContaining("enrich_contact, model_tokens") });
@@ -476,6 +477,7 @@ describe("output", () => {
     expect(err.join("")).toBe(result.stderr);
     expect(err).toEqual([]);
     const human = await run(h, ["estimate", "enrich_contact"]);
+    expect(out.join("")).toBe(result.stdout + human.stdout);
     expect(err.join("")).toBe(human.stderr);
   });
 
@@ -486,6 +488,6 @@ describe("output", () => {
     expect(JSON.parse(result.stdout).signedOut).toBe(true);
     const human = await run(h, ["status"]);
     expect(human.exitCode).toBe(0);
-    expect(human.stderr).toContain("peopleblade credits topup");
+    expect(human.stdout).toContain("peopleblade credits topup");
   });
 });

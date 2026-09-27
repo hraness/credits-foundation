@@ -124,12 +124,15 @@ process.exitCode = result.exitCode;
 shell text; every command array the package prints starts with it. When
 `stdout` and `stderr` sinks are passed, output is written as it is produced
 (`wait` announces itself before polling at a terminal); the result carries
-the same text either way. JSON and help go to stdout, human text to stderr.
+the same text either way. The result goes to stdout, as JSON or as text for
+people. Errors, the `wait` progress line and the `Next:` hint go to stderr.
 
-The same audience rule applies (or pass `audience` in `io`). A detected agent
-gets JSON without `--json`. People get text on stderr; `email` and `signout`
-also print their JSON to stdout unless stdout is a person's terminal, so
-`out=$(… credits signout)` still captures it. `wait` adds one `Next:` hint. Errors read `✗ what happened` with `→ … credits
+The same audience rule applies (`detectAudience` from desktop-foundation 0.8,
+bundled into `dist`; or pass `audience` in `io`). A detected agent gets JSON
+without `--json`. People get text on stdout; `email` and `signout` print their
+JSON to stdout instead unless stdout is a person's terminal, so
+`out=$(… credits signout)` still captures it, and their sentence then goes to
+stderr. `wait` adds one `Next:` hint. Errors read `✗ what happened` with `→ … credits
 --help` for usage mistakes. Symbols fall back to ASCII (`OK`, `FAIL`, `->`)
 when `TERM=dumb`, the locale is not UTF-8, or `HRANESS_ASCII=1`. No output is
 colored. `credits`, `credits help`, and `-h` or `--help` anywhere print

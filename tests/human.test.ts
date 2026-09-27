@@ -179,6 +179,47 @@ describe("emitCreditsRequired audience default", () => {
     expect(writes).toHaveLength(2);
   });
 
+  test("many back-to-back writes to one Node stream keep a single error/close listener pair", async () => {
+    const { EventEmitter } = await import("node:events");
+    const emitter = new EventEmitter();
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => { warnings.push(warning.name); };
+    process.on("warning", onWarning);
+    const writes: string[] = [];
+    const stream = Object.assign(emitter, {
+      isTTY: false,
+      write(text: string, callback?: (error?: Error | null) => void) { writes.push(text); callback?.(null); return true; },
+    });
+    try {
+      for (let index = 0; index < 20; index += 1) {
+        expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(true);
+        expect(emitter.listenerCount("error")).toBeLessThanOrEqual(1);
+        expect(emitter.listenerCount("close")).toBeLessThanOrEqual(1);
+      }
+      expect(writes).toHaveLength(20);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      expect(emitter.listenerCount("error")).toBe(0);
+      expect(emitter.listenerCount("close")).toBe(0);
+      expect(warnings).not.toContain("MaxListenersExceededWarning");
+    } finally { process.removeListener("warning", onWarning); }
+  });
+
+  test("an error on a shared stream fails only the write in flight", async () => {
+    const { EventEmitter } = await import("node:events");
+    const emitter = new EventEmitter();
+    let pending: ((error?: Error | null) => void) | undefined;
+    const stream = Object.assign(emitter, {
+      isTTY: false,
+      write(_text: string, callback?: (error?: Error | null) => void) { pending = callback; return true; },
+    });
+    const first = emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent");
+    emitter.emit("error", new Error("EPIPE"));
+    expect(await first).toBe(false);
+    pending?.(new Error("EPIPE"));
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(emitter.listenerCount("error")).toBe(0);
+  });
+
   const capture = (isTTY: boolean) => {
     const writes: string[] = [];
     return { writes, stderr: { isTTY, write(text: string) { writes.push(text); return true; } } };

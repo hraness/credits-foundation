@@ -1281,6 +1281,35 @@ function json(value) {
   return `${JSON.stringify(value)}
 `;
 }
+var streamGuards = new WeakMap;
+function holdStreamGuard(sink) {
+  let guard = streamGuards.get(sink);
+  if (guard === undefined) {
+    const waiters = new Set;
+    const created = { holds: 0, waiters, onEvent: () => {
+      for (const waiter of [...waiters])
+        waiter(false);
+    } };
+    streamGuards.set(sink, created);
+    sink.on("error", created.onEvent);
+    sink.on("close", created.onEvent);
+    guard = created;
+  }
+  guard.holds += 1;
+  return guard;
+}
+function releaseStreamGuard(sink, guard) {
+  guard.holds -= 1;
+  if (guard.holds > 0 || streamGuards.get(sink) !== guard)
+    return;
+  streamGuards.delete(sink);
+  try {
+    sink.removeListener?.("error", guard.onEvent);
+  } catch {}
+  try {
+    sink.removeListener?.("close", guard.onEvent);
+  } catch {}
+}
 async function writeOutput(sink, message) {
   if (pendingOutputs.has(sink))
     return false;
@@ -1288,20 +1317,12 @@ async function writeOutput(sink, message) {
   pendingOutputs.set(sink, operation);
   return new Promise((resolve) => {
     let settled = false;
+    let done = false;
     let timer;
     const stream = typeof sink.on === "function" && typeof sink.removeListener === "function";
     const release = () => {
       if (pendingOutputs.get(sink) === operation)
         pendingOutputs.delete(sink);
-    };
-    const cleanup = () => {
-      try {
-        sink.removeListener?.("error", onError);
-      } catch {}
-      try {
-        sink.removeListener?.("close", onClose);
-      } catch {}
-      release();
     };
     const settle = (ok) => {
       if (settled)
@@ -1310,23 +1331,26 @@ async function writeOutput(sink, message) {
       clearTimeout(timer);
       resolve(ok);
     };
+    let guard;
     const finished = (ok) => {
       settle(ok);
+      if (done)
+        return;
+      done = true;
       release();
-      if (stream)
-        setTimeout(cleanup, 0).unref();
-      else
-        cleanup();
+      if (guard === undefined)
+        return;
+      const held = guard;
+      held.waiters.delete(finished);
+      setTimeout(() => releaseStreamGuard(sink, held), 0).unref();
     };
-    const onError = () => finished(false);
-    const onClose = () => finished(false);
     timer = setTimeout(() => {
       settle(false);
     }, OUTPUT_TIMEOUT_MS);
     try {
       if (stream) {
-        sink.on("error", onError);
-        sink.on("close", onClose);
+        guard = holdStreamGuard(sink);
+        guard.waiters.add(finished);
         sink.write(message, (error) => finished(!error));
       } else {
         const result = sink.write(message);

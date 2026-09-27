@@ -19,6 +19,9 @@ the protocol and exit codes are unchanged.
 - Two writes in a row to the same stream no longer drop the second one. A
   host that ran two `credits` commands back to back on `process.stdout`, or a
   result followed by a hint on one stream, could lose the second write.
+- Many writes in a row to one stream share a single `error`/`close` listener
+  pair, so Node no longer prints `MaxListenersExceededWarning` after about ten
+  back-to-back writes.
 
 For consumers: if a test or wrapper reads the human text of a `credits`
 command from stderr, read stdout instead. Code that uses `--json`, a detected

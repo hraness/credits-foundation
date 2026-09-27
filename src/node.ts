@@ -373,6 +373,48 @@ function json(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
+/**
+ * One `error`/`close` listener pair per stream while any write to it is in
+ * flight, however many writes follow each other; the pair comes off one
+ * macrotask after the last write finishes.
+ */
+interface StreamGuard {
+  holds: number;
+  readonly waiters: Set<(ok: boolean) => void>;
+  readonly onEvent: () => void;
+}
+const streamGuards = new WeakMap<CreditsOutput, StreamGuard>();
+
+function holdStreamGuard(sink: CreditsOutput): StreamGuard {
+  let guard = streamGuards.get(sink);
+  if (guard === undefined) {
+    const waiters = new Set<(ok: boolean) => void>();
+    const created: StreamGuard = { holds: 0, waiters, onEvent: () => { for (const waiter of [...waiters]) waiter(false); } };
+    // Attach both listeners before sharing the guard: if `on` throws, no
+    // later write may reuse a guard that has no `error` listener.
+    try {
+      sink.on!("error", created.onEvent);
+      sink.on!("close", created.onEvent);
+    } catch (error) {
+      try { sink.removeListener?.("error", created.onEvent); } catch { /* Best effort. */ }
+      try { sink.removeListener?.("close", created.onEvent); } catch { /* Best effort. */ }
+      throw error;
+    }
+    streamGuards.set(sink, created);
+    guard = created;
+  }
+  guard.holds += 1;
+  return guard;
+}
+
+function releaseStreamGuard(sink: CreditsOutput, guard: StreamGuard): void {
+  guard.holds -= 1;
+  if (guard.holds > 0 || streamGuards.get(sink) !== guard) return;
+  streamGuards.delete(sink);
+  try { sink.removeListener?.("error", guard.onEvent); } catch { /* Host output cleanup is best effort. */ }
+  try { sink.removeListener?.("close", guard.onEvent); } catch { /* Preserve the command result. */ }
+}
+
 /** A stream callback reports accepted output, never human reading or consent. */
 async function writeOutput(sink: CreditsOutput, message: string): Promise<boolean> {
   if (pendingOutputs.has(sink)) return false;
@@ -380,15 +422,11 @@ async function writeOutput(sink: CreditsOutput, message: string): Promise<boolea
   pendingOutputs.set(sink, operation);
   return new Promise(resolve => {
     let settled = false;
+    let done = false;
     let timer: ReturnType<typeof setTimeout>;
     const stream = typeof sink.on === "function" && typeof sink.removeListener === "function";
     const release = () => {
       if (pendingOutputs.get(sink) === operation) pendingOutputs.delete(sink);
-    };
-    const cleanup = () => {
-      try { sink.removeListener?.("error", onError); } catch { /* Host output cleanup is best effort. */ }
-      try { sink.removeListener?.("close", onClose); } catch { /* Preserve the command result. */ }
-      release();
     };
     const settle = (ok: boolean) => {
       if (settled) return;
@@ -396,27 +434,29 @@ async function writeOutput(sink: CreditsOutput, message: string): Promise<boolea
       clearTimeout(timer);
       resolve(ok);
     };
+    let guard: StreamGuard | undefined;
     const finished = (ok: boolean) => {
       settle(ok);
-      // The write is done, so the next write to this sink may start at once;
-      // deferring this dropped a second write that followed right after.
+      if (done) return;
+      done = true;
+      // The write is done, so the next write to this sink may start at once.
       release();
+      if (guard === undefined) return;
+      const held = guard;
+      held.waiters.delete(finished);
       // Node invokes failed-write callbacks before emitting `error`. Keep the
-      // listener through that turn so a broken pipe cannot escape this call.
-      if (stream) setTimeout(cleanup, 0).unref();
-      else cleanup();
+      // shared listener through that turn so a broken pipe cannot escape.
+      setTimeout(() => releaseStreamGuard(sink, held), 0).unref();
     };
-    const onError = () => finished(false);
-    const onClose = () => finished(false);
     timer = setTimeout(() => {
       settle(false);
-      // An in-flight stream may emit later. Its one error listener remains
-      // until its callback/error/close, without extending this deadline.
+      // An in-flight stream may emit later. Its guard stays until its
+      // callback/error/close, without extending this deadline.
     }, OUTPUT_TIMEOUT_MS);
     try {
       if (stream) {
-        sink.on!("error", onError);
-        sink.on!("close", onClose);
+        guard = holdStreamGuard(sink);
+        guard.waiters.add(finished);
         sink.write(message, error => finished(!error));
       } else {
         const result = sink.write(message);

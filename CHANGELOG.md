@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 - 2026-09-26
+
+Many writes in a row to one stream now share a single `error`/`close`
+listener pair, so a host that writes to `process.stdout` or `process.stderr`
+many times in a row no longer sees Node's `MaxListenersExceededWarning`.
+Output, JSON shapes and exit codes are unchanged.
+
 ## 0.6.0 - 2026-09-26
 
 `credits` commands now print their result for people on stdout, like every

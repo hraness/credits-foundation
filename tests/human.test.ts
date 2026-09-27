@@ -165,6 +165,25 @@ describe("audience and terminals", () => {
 
 describe("emitCreditsRequired audience default", () => {
   const envelope = buildCreditsRequiredEnvelope(requiredInput());
+  test("a sink whose on() fails once still gets an error listener on the next write", async () => {
+    const listeners = new Map<string, number>();
+    let failNext = true;
+    const stream = {
+      isTTY: false,
+      write(_text: string, callback?: (error?: Error | null) => void) { callback?.(null); return true; },
+      on(event: string) {
+        if (failNext) { failNext = false; throw new Error("torn down"); }
+        listeners.set(event, (listeners.get(event) ?? 0) + 1);
+        return stream;
+      },
+      removeListener(event: string) { listeners.set(event, (listeners.get(event) ?? 1) - 1); return stream; },
+    };
+    expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(false);
+    const second = emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent");
+    expect(listeners.get("error")).toBe(1);
+    expect(await second).toBe(true);
+  });
+
   test("back-to-back writes to one Node-style stream both land", async () => {
     // Like process.stderr: a write callback plus error/close listeners.
     const writes: string[] = [];
@@ -177,6 +196,47 @@ describe("emitCreditsRequired audience default", () => {
     expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(true);
     expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(true);
     expect(writes).toHaveLength(2);
+  });
+
+  test("many back-to-back writes to one Node stream keep a single error/close listener pair", async () => {
+    const { EventEmitter } = await import("node:events");
+    const emitter = new EventEmitter();
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => { warnings.push(warning.name); };
+    process.on("warning", onWarning);
+    const writes: string[] = [];
+    const stream = Object.assign(emitter, {
+      isTTY: false,
+      write(text: string, callback?: (error?: Error | null) => void) { writes.push(text); callback?.(null); return true; },
+    });
+    try {
+      for (let index = 0; index < 20; index += 1) {
+        expect(await emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent")).toBe(true);
+        expect(emitter.listenerCount("error")).toBeLessThanOrEqual(1);
+        expect(emitter.listenerCount("close")).toBeLessThanOrEqual(1);
+      }
+      expect(writes).toHaveLength(20);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      expect(emitter.listenerCount("error")).toBe(0);
+      expect(emitter.listenerCount("close")).toBe(0);
+      expect(warnings).not.toContain("MaxListenersExceededWarning");
+    } finally { process.removeListener("warning", onWarning); }
+  });
+
+  test("an error on a shared stream fails only the write in flight", async () => {
+    const { EventEmitter } = await import("node:events");
+    const emitter = new EventEmitter();
+    let pending: ((error?: Error | null) => void) | undefined;
+    const stream = Object.assign(emitter, {
+      isTTY: false,
+      write(_text: string, callback?: (error?: Error | null) => void) { pending = callback; return true; },
+    });
+    const first = emitCreditsRequired(envelope, { stderr: stream, env: {} }, "agent");
+    emitter.emit("error", new Error("EPIPE"));
+    expect(await first).toBe(false);
+    pending?.(new Error("EPIPE"));
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(emitter.listenerCount("error")).toBe(0);
   });
 
   const capture = (isTTY: boolean) => {

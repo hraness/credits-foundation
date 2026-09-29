@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 - unreleased
+## 0.7.0 - 2026-09-29
 
 Menu bar companions are gone from Hraness products, so the menu rows are too.
 

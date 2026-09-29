@@ -102,9 +102,9 @@ export type CreditsVerbContext = Readonly<{
 }>;
 /**
  * A `credits` verb, structurally a desktop-foundation `Verb` with
- * `output: "raw"`: it prints the credits command's own output and returns
- * its exit status, so the JSON shapes and exit codes stay those of
- * `runCreditsCommand`.
+ * `output: "raw"`: it runs the credits command and prints its output itself.
+ * With `--json` that output is a contract envelope (`ok`, `schema`,
+ * `generatedAt`, then `data` or `error`), and exits follow the contract.
  */
 export type CreditsVerb = Readonly<{
     path: readonly ["credits", string];
@@ -121,12 +121,16 @@ export type CreditsVerb = Readonly<{
 export type CreditsVerbOptions = Omit<CreditsCommandIo, "stdout" | "stderr" | "audience" | "env">;
 /**
  * The `credits` subcommands as verbs for a desktop-foundation registry:
- * `credits status` and `credits estimate` (read), `credits topup`,
- * `credits wait`, `credits email` and `credits signout` (operate). Spread
- * them into `defineRegistry(product, [...])`; `product` must be the
- * registry's product name, which prefixes each schema
- * (`peopleblade.credits-status/1`). Each verb runs `runCreditsCommand`, so
- * output, `--json` shapes and exit codes are unchanged, including exit 3
- * when `wait` times out with payment still needed.
+ * `credits protocol`, `credits status` and `credits estimate` (read),
+ * `credits topup`, `credits wait`, `credits email` and `credits signout`
+ * (operate). Spread them into `defineRegistry(product, [...])`; `product`
+ * must be the registry's product name, which prefixes each schema
+ * (`peopleblade.credits-status/1`). Text output is `runCreditsCommand`'s.
+ * With `--json` a success prints `{ ok: true, schema, generatedAt, data }`
+ * with the command's JSON as `data`, and a failure prints a
+ * `hraness.error/1` envelope whose code is `usage` for a malformed command
+ * line (exit 2) or `<product>.credits-<code>` (exit 1), such as
+ * `peopleblade.credits-timeout` when `wait` ran out with payment still
+ * needed. `credits protocol` always prints JSON.
  */
 export declare function creditsVerbs(product: string, profile: CreditsProductProfile, options?: CreditsVerbOptions): readonly CreditsVerb[];

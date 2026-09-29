@@ -972,6 +972,45 @@ export async function runCreditsCommand(
   argv: readonly string[] = [],
   io: CreditsCommandIo = {},
 ): Promise<CreditsCommandResult> {
+  return runCredits(profile, argv, io);
+}
+
+/** Registry-verb mode: `--json` output is a desktop-foundation envelope and exits follow the contract. */
+type EnvelopeMode = Readonly<{ product: string; schema: string; now: () => number }>;
+
+/**
+ * The protocol as a registry verb prints it: exits and the wait and failure
+ * guidance follow the contract instead of `runCreditsCommand`'s own codes.
+ */
+function contractProtocol(protocol: unknown): unknown {
+  if (protocol === null || typeof protocol !== "object" || !("lifecycle" in protocol)) return protocol;
+  const lifecycle = (protocol as { lifecycle: Record<string, string> }).lifecycle;
+  return {
+    ...protocol,
+    exitCodes: {
+      "0": "success",
+      "1": "failure; error.code (such as <product>.credits-timeout or <product>.credits-expired) says which",
+      "2": "usage: the command line is malformed",
+    },
+    lifecycle: {
+      ...lifecycle,
+      wait: "After the person says they paid, or when they ask you to wait, run the wait command. It polls every five seconds until paid, expired, or its timeout (default 15m). Exit 0 means paid and any issued device token is stored locally; error.code <product>.credits-timeout means still unpaid, so wait again or stop; <product>.credits-expired means the claim expired, so create a new one with topup.",
+      failures: "Exit 1 with a <product>.credits-* error code means the command could not finish; read error.code and error.message, report it and stop. Commands are safe to rerun. Nothing retries on its own except wait polling.",
+    },
+  };
+}
+
+/** The contract error code for a credits failure: `usage` for a malformed command line, else a product code. */
+function envelopeErrorCode(product: string, code: string): string {
+  return code === "usage_error" ? "usage" : `${product}.credits-${code.replaceAll("_", "-")}`;
+}
+
+async function runCredits(
+  profile: CreditsProductProfile,
+  argv: readonly string[],
+  io: CreditsCommandIo,
+  envelope?: EnvelopeMode,
+): Promise<CreditsCommandResult> {
   const emitter = new Emitter(io);
   const args = Array.from(argv);
   const env = io.env ?? process.env;
@@ -1001,7 +1040,31 @@ export async function runCreditsCommand(
   } catch (error) {
     outcome = { code: "internal_error", exitCode: 1, message: `The credits command failed: ${sanitizeText(error, 200)}` };
   }
-  if (isFailure(outcome)) {
+  if (envelope !== undefined && isFailure(outcome)) {
+    // Contract exits: 2 only for a malformed command line; every other failure,
+    // including a `wait` that timed out with payment still needed, is 1.
+    outcome = { ...outcome, exitCode: outcome.code === "usage_error" ? 2 : 1 };
+  }
+  if (envelope !== undefined && wantsJson) {
+    const generatedAt = new Date(envelope.now()).toISOString();
+    if (isFailure(outcome)) {
+      const extra = { ...(outcome.service === undefined ? {} : { service: outcome.service }), ...(outcome.fields ?? {}) };
+      await emitter.out(json({
+        ok: false,
+        schema: "hraness.error/1",
+        generatedAt,
+        error: {
+          code: envelopeErrorCode(envelope.product, outcome.code),
+          message: outcome.message,
+          ...(Object.keys(extra).length === 0 ? {} : { detail: JSON.stringify(extra) }),
+        },
+      }));
+      await emitter.err(`${outcome.message}\n`);
+    } else {
+      const data = envelope.schema.endsWith(".credits-protocol/1") ? contractProtocol(outcome.json) : outcome.json;
+      await emitter.out(json({ ok: true, schema: envelope.schema, generatedAt, data }));
+    }
+  } else if (isFailure(outcome)) {
     if (wantsJson) {
       await emitter.out(json({
         error: outcome.code,
@@ -1053,9 +1116,9 @@ export type CreditsVerbContext = Readonly<{
 
 /**
  * A `credits` verb, structurally a desktop-foundation `Verb` with
- * `output: "raw"`: it prints the credits command's own output and returns
- * its exit status, so the JSON shapes and exit codes stay those of
- * `runCreditsCommand`.
+ * `output: "raw"`: it runs the credits command and prints its output itself.
+ * With `--json` that output is a contract envelope (`ok`, `schema`,
+ * `generatedAt`, then `data` or `error`), and exits follow the contract.
  */
 export type CreditsVerb = Readonly<{
   path: readonly ["credits", string];
@@ -1080,6 +1143,7 @@ const CREDITS_VERBS: readonly Readonly<{
   usage?: string;
   valueFlags: readonly string[];
 }>[] = [
+  { name: "protocol", opClass: "read", schema: "credits-protocol/1", summary: "Print the credits protocol for agents", valueFlags: [] },
   { name: "status", opClass: "read", schema: "credits-status/1", summary: "Show your credits balance", valueFlags: [] },
   { name: "estimate", opClass: "read", schema: "credits-estimate/1", summary: "Show what an operation costs", usage: "<operation>", valueFlags: ["units"] },
   { name: "topup", opClass: "operate", schema: "credits-topup/1", summary: "Get a link to add credits", valueFlags: ["usd", "pack", "email"] },
@@ -1105,13 +1169,17 @@ function forwardingSink(sink: { write(text: string): unknown; readonly isTTY?: b
 
 /**
  * The `credits` subcommands as verbs for a desktop-foundation registry:
- * `credits status` and `credits estimate` (read), `credits topup`,
- * `credits wait`, `credits email` and `credits signout` (operate). Spread
- * them into `defineRegistry(product, [...])`; `product` must be the
- * registry's product name, which prefixes each schema
- * (`peopleblade.credits-status/1`). Each verb runs `runCreditsCommand`, so
- * output, `--json` shapes and exit codes are unchanged, including exit 3
- * when `wait` times out with payment still needed.
+ * `credits protocol`, `credits status` and `credits estimate` (read),
+ * `credits topup`, `credits wait`, `credits email` and `credits signout`
+ * (operate). Spread them into `defineRegistry(product, [...])`; `product`
+ * must be the registry's product name, which prefixes each schema
+ * (`peopleblade.credits-status/1`). Text output is `runCreditsCommand`'s.
+ * With `--json` a success prints `{ ok: true, schema, generatedAt, data }`
+ * with the command's JSON as `data`, and a failure prints a
+ * `hraness.error/1` envelope whose code is `usage` for a malformed command
+ * line (exit 2) or `<product>.credits-<code>` (exit 1), such as
+ * `peopleblade.credits-timeout` when `wait` ran out with payment still
+ * needed. `credits protocol` always prints JSON.
  */
 export function creditsVerbs(product: string, profile: CreditsProductProfile, options: CreditsVerbOptions = {}): readonly CreditsVerb[] {
   if (!/^[a-z][a-z0-9-]{0,31}$/u.test(product)) throw new TypeError("Invalid registry product name.");
@@ -1131,13 +1199,15 @@ export function creditsVerbs(product: string, profile: CreditsProductProfile, op
       ...Object.entries(argv.flags).map(([name, value]) => value === true ? `--${name}` : `--${name}=${value}`),
     ],
     run: async (argv: readonly string[], context: CreditsVerbContext): Promise<number> => {
-      const result = await runCreditsCommand(profile, context.json ? [...argv, "--json"] : argv, {
+      // `protocol` is machine-readable only, so it always runs as JSON.
+      const json = context.json || spec.name === "protocol";
+      const result = await runCredits(profile, json && !argv.includes("--json") ? [...argv, "--json"] : argv, {
         ...options,
         stdout: forwardingSink(context.io.stdout),
         stderr: forwardingSink(context.io.stderr),
         audience: context.audience,
         ...(context.io.env === undefined ? {} : { env: context.io.env }),
-      });
+      }, { product, schema: `${product}.${spec.schema}`, now: options.now ?? Date.now });
       return result.exitCode;
     },
   })));

@@ -6,8 +6,10 @@ Menu bar companions are gone from Hraness products, so the menu rows are too.
 
 - New: `creditsVerbs(product, profile)` in `@hraness/credits-foundation/node`
   returns the `credits` commands as desktop-foundation registry verbs
-  (`credits status`, `estimate`, `topup`, `wait`, `email`, `signout`). Output,
-  JSON shapes and exit codes are those of `runCreditsCommand`.
+  (`credits protocol`, `status`, `estimate`, `topup`, `wait`, `email`,
+  `signout`). Text output is `runCreditsCommand`'s; `--json` output is the
+  desktop-foundation envelope, and exits follow its contract (2 `usage`, 1
+  with a `<product>.credits-*` code). `runCreditsCommand` itself is unchanged.
 - Removed: `creditsMenuItems` and its `CreditsMenuStatusRow`,
   `CreditsMenuAddRow` and `CreditsMenuOptions` types. Show the balance with
   `credits status` instead.

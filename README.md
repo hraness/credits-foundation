@@ -198,11 +198,20 @@ import { creditsVerbs } from "@hraness/credits-foundation/node";
 const registry = defineRegistry("peopleblade", [...productVerbs, ...creditsVerbs("peopleblade", profile)]);
 ```
 
-`credits status` and `credits estimate` are read verbs; `credits topup`,
-`credits wait`, `credits email` and `credits signout` are operate verbs. Each
-runs `runCreditsCommand` and prints its output, so `--json` shapes and exit
-codes are the ones in the table above, not the registry envelope. The
-registry refuses options a command doesn't take before anything runs. This
+`credits protocol`, `credits status` and `credits estimate` are read verbs;
+`credits topup`, `credits wait`, `credits email` and `credits signout` are
+operate verbs. Text output is the same as `runCreditsCommand`'s. With
+`--json` each verb prints the desktop-foundation envelope instead of the bare
+shapes above: `{ ok: true, schema: "<product>.credits-status/1",
+generatedAt, data }` with the command's JSON as `data`, or a
+`hraness.error/1` envelope. Exits follow the contract: 2 with code `usage` for
+a malformed command line, including an option the command doesn't take (the
+registry refuses those before anything runs); 1 with a
+`<product>.credits-<code>` code for everything else, such as
+`peopleblade.credits-unauthorized` or `peopleblade.credits-timeout` when
+`wait` ran out with payment still needed. A timeout's claim, like any other
+extra field, is in `error.detail` as JSON. `credits protocol` always prints
+JSON, and its `exitCodes` and wait guidance describe these contract exits. This
 package doesn't depend on desktop-foundation at run time: the verbs match its
 `Verb` shape.
 

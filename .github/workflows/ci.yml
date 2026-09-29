@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     strategy:
@@ -34,6 +38,7 @@ jobs:
     if: always()
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - run: test "$CHECK" = success
         env:

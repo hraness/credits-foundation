@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0 - unreleased
+
+Menu bar companions are gone from Hraness products, so the menu rows are too.
+
+- New: `creditsVerbs(product, profile)` in `@hraness/credits-foundation/node`
+  returns the `credits` commands as desktop-foundation registry verbs
+  (`credits status`, `estimate`, `topup`, `wait`, `email`, `signout`). Output,
+  JSON shapes and exit codes are those of `runCreditsCommand`.
+- Removed: `creditsMenuItems` and its `CreditsMenuStatusRow`,
+  `CreditsMenuAddRow` and `CreditsMenuOptions` types. Show the balance with
+  `credits status` instead.
+- The bundled audience rule now comes from desktop-foundation 0.9.0; it
+  behaves the same.
+
 ## 0.6.1 - 2026-09-26
 
 Many writes in a row to one stream now share a single `error`/`close`

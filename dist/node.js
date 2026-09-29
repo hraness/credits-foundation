@@ -420,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.6.1";
+var CREDITS_FOUNDATION_VERSION = "0.7.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -923,19 +923,6 @@ function creditsProtocol(profile) {
       failures: "Exit 1 means local state or the service is unavailable; report it and stop. Commands are safe to rerun. Nothing retries on its own except wait polling."
     })
   });
-}
-var MENU_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-function creditsMenuItems(status, options = {}) {
-  const id = options.id ?? "credits.add";
-  if (!MENU_ACTION_ID.test(id) || id.startsWith("foundation."))
-    throw new TypeError("Invalid credits menu action ID.");
-  const add = Object.freeze({ kind: "action", id, label: "Add credits", symbol: "action.add", opens: "browser" });
-  if ("signedOut" in status) {
-    return Object.freeze([Object.freeze({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" }), add]);
-  }
-  const balance = `$${status.balance.usd} in credits`;
-  const row = status.lowBalance ? Object.freeze({ kind: "status", symbol: "status.attention", label: balance, detail: "Balance is low" }) : Object.freeze({ kind: "status", symbol: "status.running", label: balance });
-  return Object.freeze([row, add]);
 }
 
 // node_modules/@hraness/desktop-foundation/dist/src/audience.js
@@ -1964,10 +1951,64 @@ async function runCreditsCommand(profile, argv = [], io = {}) {
   }
   return { exitCode: outcome.exitCode, stdout: emitter.stdout, stderr: emitter.stderr };
 }
+var CREDITS_VERBS = [
+  { name: "status", opClass: "read", schema: "credits-status/1", summary: "Show your credits balance", valueFlags: [] },
+  { name: "estimate", opClass: "read", schema: "credits-estimate/1", summary: "Show what an operation costs", usage: "<operation>", valueFlags: ["units"] },
+  { name: "topup", opClass: "operate", schema: "credits-topup/1", summary: "Get a link to add credits", valueFlags: ["usd", "pack", "email"] },
+  { name: "wait", opClass: "operate", schema: "credits-wait/1", summary: "Wait for a payment to finish", valueFlags: ["claim", "timeout"] },
+  { name: "email", opClass: "operate", schema: "credits-email/1", summary: "Email the payment link to yourself", valueFlags: ["to", "claim"] },
+  { name: "signout", opClass: "operate", schema: "credits-signout/1", summary: "Forget the credits sign-in on this device", valueFlags: [] }
+];
+function forwardingSink(sink) {
+  return {
+    ...sink.isTTY === undefined ? {} : { isTTY: sink.isTTY },
+    write(text2, callback) {
+      try {
+        sink.write(text2);
+        callback?.(null);
+      } catch (error) {
+        callback?.(error instanceof Error ? error : new Error(String(error)));
+      }
+      return true;
+    }
+  };
+}
+function creditsVerbs(product, profile, options = {}) {
+  if (!/^[a-z][a-z0-9-]{0,31}$/u.test(product))
+    throw new TypeError("Invalid registry product name.");
+  if (parseCreditsProfile(profile) === null)
+    throw new TypeError("Invalid credits product profile.");
+  return Object.freeze(CREDITS_VERBS.map((spec) => Object.freeze({
+    path: Object.freeze(["credits", spec.name]),
+    opClass: spec.opClass,
+    schema: `${product}.${spec.schema}`,
+    summary: spec.summary,
+    ...spec.usage === undefined ? {} : { usage: spec.usage },
+    valueFlags: Object.freeze([...spec.valueFlags]),
+    flags: Object.freeze([]),
+    output: "raw",
+    input: (argv) => [
+      spec.name,
+      ...argv.positionals,
+      ...Object.entries(argv.flags).map(([name, value]) => value === true ? `--${name}` : `--${name}=${value}`)
+    ],
+    run: async (argv, context) => {
+      const result = await runCreditsCommand(profile, context.json ? [...argv, "--json"] : argv, {
+        ...options,
+        stdout: forwardingSink(context.io.stdout),
+        stderr: forwardingSink(context.io.stderr),
+        audience: context.audience,
+        ...context.io.env === undefined ? {} : { env: context.io.env }
+      });
+      return result.exitCode;
+    }
+  })));
+}
 export {
   runCreditsCommand,
   readStoredDeviceToken,
   emitCreditsRequired,
   detectCreditsAudience,
+  creditsVerbs,
   creditsStateDirectory
 };

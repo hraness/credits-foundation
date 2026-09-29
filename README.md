@@ -185,16 +185,26 @@ Commands never print device tokens or claim secrets. The one exception is a
 rescue: if `wait` receives the once-only token and then cannot write the state
 file, the failure message includes the token so the paid purchase is not lost.
 
-## Show credits in a menu
+## Add the credits commands to a product CLI
 
-`creditsMenuItems(status)` returns two desktop-foundation menu kit v2 rows for
-a `status --json` result: a status row (`$8.10 in credits`, with
-`status.attention` and "Balance is low" when the balance is low, or
-`status.signedOut` "No credits on this device") and an `Add credits` action
-(`symbol: "action.add"`, `opens: "browser"`, ID `credits.add` unless you pass
-`{ id }`). Put the status row in the menu's top section next to the product's
-own status and the action with the other controls. Map the action to
-`status.topup.url`, or to the product's topup when signed out.
+`creditsVerbs(product, profile)` from `@hraness/credits-foundation/node`
+returns the `credits` commands as desktop-foundation registry verbs, so they
+show up in `<product> commands --json` next to the product's own:
+
+```ts
+import { defineRegistry } from "@hraness/desktop-foundation/registry";
+import { creditsVerbs } from "@hraness/credits-foundation/node";
+
+const registry = defineRegistry("peopleblade", [...productVerbs, ...creditsVerbs("peopleblade", profile)]);
+```
+
+`credits status` and `credits estimate` are read verbs; `credits topup`,
+`credits wait`, `credits email` and `credits signout` are operate verbs. Each
+runs `runCreditsCommand` and prints its output, so `--json` shapes and exit
+codes are the ones in the table above, not the registry envelope. The
+registry refuses options a command doesn't take before anything runs. This
+package doesn't depend on desktop-foundation at run time: the verbs match its
+`Verb` shape.
 
 ## Meter work from a product backend
 

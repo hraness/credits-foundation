@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, utimes, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
-  buildCreditsRequiredEnvelope, creditsMenuItems, formatValidity, humanizeOperation, parseCreditsStatus,
+  buildCreditsRequiredEnvelope, formatValidity, humanizeOperation, parseCreditsStatus,
   type CreditsSignedOutStatus,
 } from "../src/index.js";
 import { detectCreditsAudience, emitCreditsRequired, runCreditsCommand, type CreditsCommandIo } from "../src/node.js";
@@ -272,32 +272,3 @@ describe("formatValidity and humanizeOperation", () => {
   });
 });
 
-describe("creditsMenuItems", () => {
-  const status = parseCreditsStatus(statusResponse())!;
-  test("a balance status row and an Add credits action (menu kit v2)", () => {
-    expect(creditsMenuItems(status)).toEqual([
-      { kind: "status", symbol: "status.running", label: "$8.10 in credits" },
-      { kind: "action", id: "credits.add", label: "Add credits", symbol: "action.add", opens: "browser" },
-    ]);
-  });
-  test("a low balance needs attention", () => {
-    const low = parseCreditsStatus(statusResponse({ lowBalance: true }))!;
-    expect(creditsMenuItems(low, { id: "credits.topup" })).toEqual([
-      { kind: "status", symbol: "status.attention", label: "$8.10 in credits", detail: "Balance is low" },
-      { kind: "action", id: "credits.topup", label: "Add credits", symbol: "action.add", opens: "browser" },
-    ]);
-  });
-  test("signed out", () => {
-    const signedOut: CreditsSignedOutStatus = { schemaVersion: "hraness-credits-status-v1", product: { id: "peopleblade", name: "PeopleBlade" }, signedOut: true, topup: { command: ["peopleblade", "credits", "topup", "--json"] } };
-    expect(creditsMenuItems(signedOut)[0]).toEqual({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" });
-  });
-  test("rejects reserved or malformed IDs", () => {
-    for (const id of ["foundation.login", "", "has space", "-x"]) expect(() => creditsMenuItems(status, { id })).toThrow(TypeError);
-  });
-  test("labels pass the menu lint basics: sentence case, ≤48 characters, no glyphs or paths", () => {
-    for (const row of creditsMenuItems(status)) {
-      expect(row.label.length).toBeLessThanOrEqual(48);
-      expect(row.label).not.toMatch(/[↗…/]|\.\.\./u);
-    }
-  });
-});

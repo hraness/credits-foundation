@@ -1030,3 +1030,115 @@ export async function runCreditsCommand(
   }
   return { exitCode: outcome.exitCode, stdout: emitter.stdout, stderr: emitter.stderr };
 }
+
+// ---------------------------------------------------------------------------
+// Registry verbs
+
+/** The parsed arguments a desktop-foundation registry passes to `input`. */
+export type CreditsVerbArgs = Readonly<{
+  positionals: readonly string[];
+  flags: Readonly<Record<string, string | true>>;
+}>;
+
+/** The context a desktop-foundation registry passes to `run`. Only these fields are read. */
+export type CreditsVerbContext = Readonly<{
+  json: boolean;
+  audience: CreditsAudience;
+  io: Readonly<{
+    stdout: { write(text: string): unknown; readonly isTTY?: boolean };
+    stderr: { write(text: string): unknown; readonly isTTY?: boolean };
+    env?: Readonly<Record<string, string | undefined>>;
+  }>;
+}>;
+
+/**
+ * A `credits` verb, structurally a desktop-foundation `Verb` with
+ * `output: "raw"`: it prints the credits command's own output and returns
+ * its exit status, so the JSON shapes and exit codes stay those of
+ * `runCreditsCommand`.
+ */
+export type CreditsVerb = Readonly<{
+  path: readonly ["credits", string];
+  opClass: "read" | "operate";
+  schema: string;
+  summary: string;
+  usage?: string;
+  valueFlags: readonly string[];
+  flags: readonly string[];
+  output: "raw";
+  input: (argv: CreditsVerbArgs) => readonly string[];
+  run: (input: readonly string[], context: CreditsVerbContext) => Promise<number>;
+}>;
+
+export type CreditsVerbOptions = Omit<CreditsCommandIo, "stdout" | "stderr" | "audience" | "env">;
+
+const CREDITS_VERBS: readonly Readonly<{
+  name: string;
+  opClass: "read" | "operate";
+  schema: string;
+  summary: string;
+  usage?: string;
+  valueFlags: readonly string[];
+}>[] = [
+  { name: "status", opClass: "read", schema: "credits-status/1", summary: "Show your credits balance", valueFlags: [] },
+  { name: "estimate", opClass: "read", schema: "credits-estimate/1", summary: "Show what an operation costs", usage: "<operation>", valueFlags: ["units"] },
+  { name: "topup", opClass: "operate", schema: "credits-topup/1", summary: "Get a link to add credits", valueFlags: ["usd", "pack", "email"] },
+  { name: "wait", opClass: "operate", schema: "credits-wait/1", summary: "Wait for a payment to finish", valueFlags: ["claim", "timeout"] },
+  { name: "email", opClass: "operate", schema: "credits-email/1", summary: "Email the payment link to yourself", valueFlags: ["to", "claim"] },
+  { name: "signout", opClass: "operate", schema: "credits-signout/1", summary: "Forget the credits sign-in on this device", valueFlags: [] },
+];
+
+function forwardingSink(sink: { write(text: string): unknown; readonly isTTY?: boolean }): CreditsOutput {
+  return {
+    ...(sink.isTTY === undefined ? {} : { isTTY: sink.isTTY }),
+    write(text: string, callback?: (error?: Error | null) => void) {
+      try {
+        sink.write(text);
+        callback?.(null);
+      } catch (error) {
+        callback?.(error instanceof Error ? error : new Error(String(error)));
+      }
+      return true;
+    },
+  };
+}
+
+/**
+ * The `credits` subcommands as verbs for a desktop-foundation registry:
+ * `credits status` and `credits estimate` (read), `credits topup`,
+ * `credits wait`, `credits email` and `credits signout` (operate). Spread
+ * them into `defineRegistry(product, [...])`; `product` must be the
+ * registry's product name, which prefixes each schema
+ * (`peopleblade.credits-status/1`). Each verb runs `runCreditsCommand`, so
+ * output, `--json` shapes and exit codes are unchanged, including exit 3
+ * when `wait` times out with payment still needed.
+ */
+export function creditsVerbs(product: string, profile: CreditsProductProfile, options: CreditsVerbOptions = {}): readonly CreditsVerb[] {
+  if (!/^[a-z][a-z0-9-]{0,31}$/u.test(product)) throw new TypeError("Invalid registry product name.");
+  if (parseCreditsProfile(profile) === null) throw new TypeError("Invalid credits product profile.");
+  return Object.freeze(CREDITS_VERBS.map(spec => Object.freeze({
+    path: Object.freeze(["credits", spec.name] as const),
+    opClass: spec.opClass,
+    schema: `${product}.${spec.schema}`,
+    summary: spec.summary,
+    ...(spec.usage === undefined ? {} : { usage: spec.usage }),
+    valueFlags: Object.freeze([...spec.valueFlags]),
+    flags: Object.freeze([]),
+    output: "raw" as const,
+    input: (argv: CreditsVerbArgs): readonly string[] => [
+      spec.name,
+      ...argv.positionals,
+      ...Object.entries(argv.flags).map(([name, value]) => value === true ? `--${name}` : `--${name}=${value}`),
+    ],
+    run: async (argv: readonly string[], context: CreditsVerbContext): Promise<number> => {
+      const result = await runCreditsCommand(profile, context.json ? [...argv, "--json"] : argv, {
+        ...options,
+        stdout: forwardingSink(context.io.stdout),
+        stderr: forwardingSink(context.io.stderr),
+        audience: context.audience,
+        ...(context.io.env === undefined ? {} : { env: context.io.env }),
+      });
+      return result.exitCode;
+    },
+  })));
+}

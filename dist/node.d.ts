@@ -79,3 +79,58 @@ export declare function emitCreditsRequired(envelope: CreditsRequiredEnvelope, i
  * unreachable; 2 usage error, invalid id, or expired claim; 3 payment still required after `wait` timed out.
  */
 export declare function runCreditsCommand(profile: CreditsProductProfile, argv?: readonly string[], io?: CreditsCommandIo): Promise<CreditsCommandResult>;
+/** The parsed arguments a desktop-foundation registry passes to `input`. */
+export type CreditsVerbArgs = Readonly<{
+    positionals: readonly string[];
+    flags: Readonly<Record<string, string | true>>;
+}>;
+/** The context a desktop-foundation registry passes to `run`. Only these fields are read. */
+export type CreditsVerbContext = Readonly<{
+    json: boolean;
+    audience: CreditsAudience;
+    io: Readonly<{
+        stdout: {
+            write(text: string): unknown;
+            readonly isTTY?: boolean;
+        };
+        stderr: {
+            write(text: string): unknown;
+            readonly isTTY?: boolean;
+        };
+        env?: Readonly<Record<string, string | undefined>>;
+    }>;
+}>;
+/**
+ * A `credits` verb, structurally a desktop-foundation `Verb` with
+ * `output: "raw"`: it runs the credits command and prints its output itself.
+ * With `--json` that output is a contract envelope (`ok`, `schema`,
+ * `generatedAt`, then `data` or `error`), and exits follow the contract.
+ */
+export type CreditsVerb = Readonly<{
+    path: readonly ["credits", string];
+    opClass: "read" | "operate";
+    schema: string;
+    summary: string;
+    usage?: string;
+    valueFlags: readonly string[];
+    flags: readonly string[];
+    output: "raw";
+    input: (argv: CreditsVerbArgs) => readonly string[];
+    run: (input: readonly string[], context: CreditsVerbContext) => Promise<number>;
+}>;
+export type CreditsVerbOptions = Omit<CreditsCommandIo, "stdout" | "stderr" | "audience" | "env">;
+/**
+ * The `credits` subcommands as verbs for a desktop-foundation registry:
+ * `credits protocol`, `credits status` and `credits estimate` (read),
+ * `credits topup`, `credits wait`, `credits email` and `credits signout`
+ * (operate). Spread them into `defineRegistry(product, [...])`; `product`
+ * must be the registry's product name, which prefixes each schema
+ * (`peopleblade.credits-status/1`). Text output is `runCreditsCommand`'s.
+ * With `--json` a success prints `{ ok: true, schema, generatedAt, data }`
+ * with the command's JSON as `data`, and a failure prints a
+ * `hraness.error/1` envelope whose code is `usage` for a malformed command
+ * line (exit 2) or `<product>.credits-<code>` (exit 1), such as
+ * `peopleblade.credits-timeout` when `wait` ran out with payment still
+ * needed. `credits protocol` always prints JSON.
+ */
+export declare function creditsVerbs(product: string, profile: CreditsProductProfile, options?: CreditsVerbOptions): readonly CreditsVerb[];

@@ -19,7 +19,7 @@ export {
   type CreditsPickupExpectationV2, type CreditsBalanceV2, type CreditsErrorV2,
 } from "./pickup-v2.js";
 
-export const CREDITS_FOUNDATION_VERSION = "0.6.1";
+export const CREDITS_FOUNDATION_VERSION = "0.7.0";
 export const CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 export const MICRO_USD_PER_USD = 1_000_000;
 export const MICRO_USD_PER_CREDIT = 10_000;
@@ -731,59 +731,3 @@ export function creditsProtocol(profile: CreditsProductProfile) {
 }
 
 export type CreditsProtocol = ReturnType<typeof creditsProtocol>;
-
-// ---------------------------------------------------------------------------
-// Menu kit v2
-
-/**
- * A top-level status row in a desktop-foundation menu kit v2 snapshot. These
- * shapes mirror `StatusItemV2` and `ActionItemV2` from
- * `@hraness/desktop-foundation`; this package does not depend on it.
- */
-export type CreditsMenuStatusRow = Readonly<{
-  kind: "status";
-  symbol: "status.running" | "status.attention" | "status.signedOut";
-  label: string;
-  detail?: string;
-}>;
-
-/** The `Add credits` action row. It opens the browser; the product maps its ID to the topup link. */
-export type CreditsMenuAddRow = Readonly<{
-  kind: "action";
-  id: string;
-  label: "Add credits";
-  symbol: "action.add";
-  opens: "browser";
-}>;
-
-export interface CreditsMenuOptions {
-  /** Action ID for `Add credits`. Default `credits.add`. */
-  readonly id?: string;
-}
-
-const MENU_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-
-/**
- * Standard menu rows for credits: `[status, add]`. Put the status row in the
- * top section with the product's own status (at most two status rows there),
- * and the `Add credits` action with the other controls. When the balance is
- * low the status row uses `status.attention`; the product may also set its
- * mark's tone to `attention`. Signed out, `Add credits` runs the product's
- * topup, which creates the link; signed in, it opens `status.topup.url`.
- */
-export function creditsMenuItems(
-  status: CreditsStatus | CreditsSignedOutStatus,
-  options: CreditsMenuOptions = {},
-): readonly [CreditsMenuStatusRow, CreditsMenuAddRow] {
-  const id = options.id ?? "credits.add";
-  if (!MENU_ACTION_ID.test(id) || id.startsWith("foundation.")) throw new TypeError("Invalid credits menu action ID.");
-  const add: CreditsMenuAddRow = Object.freeze({ kind: "action", id, label: "Add credits", symbol: "action.add", opens: "browser" });
-  if ("signedOut" in status) {
-    return Object.freeze([Object.freeze({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" }), add] as const);
-  }
-  const balance = `$${status.balance.usd} in credits`;
-  const row: CreditsMenuStatusRow = status.lowBalance
-    ? Object.freeze({ kind: "status", symbol: "status.attention", label: balance, detail: "Balance is low" })
-    : Object.freeze({ kind: "status", symbol: "status.running", label: balance });
-  return Object.freeze([row, add] as const);
-}

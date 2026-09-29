@@ -420,7 +420,7 @@ function parseCreditsErrorV2(value, httpStatus) {
 }
 
 // src/index.ts
-var CREDITS_FOUNDATION_VERSION = "0.6.1";
+var CREDITS_FOUNDATION_VERSION = "0.7.0";
 var CREDITS_SERVICE_ORIGIN = "https://credits.hraness.com";
 var MICRO_USD_PER_USD = 1e6;
 var MICRO_USD_PER_CREDIT = 1e4;
@@ -923,19 +923,6 @@ function creditsProtocol(profile) {
       failures: "Exit 1 means local state or the service is unavailable; report it and stop. Commands are safe to rerun. Nothing retries on its own except wait polling."
     })
   });
-}
-var MENU_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-function creditsMenuItems(status, options = {}) {
-  const id = options.id ?? "credits.add";
-  if (!MENU_ACTION_ID.test(id) || id.startsWith("foundation."))
-    throw new TypeError("Invalid credits menu action ID.");
-  const add = Object.freeze({ kind: "action", id, label: "Add credits", symbol: "action.add", opens: "browser" });
-  if ("signedOut" in status) {
-    return Object.freeze([Object.freeze({ kind: "status", symbol: "status.signedOut", label: "No credits on this device" }), add]);
-  }
-  const balance = `$${status.balance.usd} in credits`;
-  const row = status.lowBalance ? Object.freeze({ kind: "status", symbol: "status.attention", label: balance, detail: "Balance is low" }) : Object.freeze({ kind: "status", symbol: "status.running", label: balance });
-  return Object.freeze([row, add]);
 }
 
 // src/transport.ts

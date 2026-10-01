@@ -3,8 +3,8 @@
 `@hraness/credits-foundation` lets a Hraness product charge prepaid credits for
 paid work. When the balance is too low for a command, the command stops and
 tells the person or agent how many credits it needs and where to pay. After
-payment, the product's `credits wait` command or a rerun of the original
-command resumes the work.
+payment, `credits wait` confirms payment and saves any new device token;
+rerun the original command to continue.
 
 A product's CLI, its backend, and the agents that drive it all use the same
 money types from this package. Amounts are integer micro-USD, and one credit is
@@ -127,7 +127,7 @@ shell text; every command array the package prints starts with it. When
 the same text either way. The result goes to stdout, as JSON or as text for
 people. Errors, the `wait` progress line and the `Next:` hint go to stderr.
 
-The same audience rule applies (`detectAudience` from desktop-foundation 0.8,
+The same audience rule applies (`detectAudience` from Desktop Foundation,
 bundled into `dist`; or pass `audience` in `io`). A detected agent gets JSON
 without `--json`. People get text on stdout; `email` and `signout` print their
 JSON to stdout instead unless stdout is a person's terminal, so
@@ -311,7 +311,8 @@ command arrays for this product, placeholders, exit codes, schema names and
 lifecycle guidance. The same value comes from `creditsProtocol(profile)` in the
 root entry. An agent that sees a `hraness-credits-required-v1` line shows the
 person the link and the price, offers the email command when they are not at
-the terminal, and after payment runs `wait` or reruns the original command. It
+the terminal, and after payment runs `wait` to save any new device token, then
+reruns the original command. It
 never retries before payment, never enters card details, and never opens the
 link itself. See [agent integration](docs/agents.md).
 

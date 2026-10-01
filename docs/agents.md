@@ -88,6 +88,8 @@ asks.
 Exit `1` means local state is unavailable or locked, or the service could not
 be reached; report the message and stop. Exit `2` is a usage error, an invalid
 ID, or an expired link. Commands are safe to rerun; nothing retries on its own
-except `wait` polling. Device tokens and claim secrets stay in local state and
-never appear in output; do not read the state directory or copy anything from
-it into other commands or messages.
+except `wait` polling. Ordinary output omits device tokens and claim secrets.
+If `wait` cannot save a newly issued token, its recovery message includes that
+token so the purchase can remain usable. Keep that output local; do not copy
+it into messages or logs. Do not read the state directory or copy anything
+from it into other commands or messages.

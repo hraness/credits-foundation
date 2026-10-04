@@ -16,6 +16,15 @@ The package holds no ledger. The credits service owns balances, prices, packs,
 and checkout; this library parses what the service says and presents it. It
 does not enter card details, open a browser, or send email itself.
 
+## Choose the part your product needs
+
+- [Payment message](#tell-someone-what-to-pay): build a credits-required envelope without state or network access.
+- [CLI commands](#connect-a-cli): connect top-up, status, wait, and estimate; check their output and exit codes.
+- [CLI registry](#add-the-credits-commands-to-a-product-cli): expose the same commands through Desktop Foundation.
+- [Backend metering](#meter-work-from-a-product-backend): hold credits, perform work, and inspect the service's settlement result.
+- [Local state](#local-state): understand token storage, locking, and the once-only token rescue path.
+- [V2 recovery](#not-yet-active-v2-recovery): read the parsers and storage model separately from the active v1 commands.
+
 ## What it provides
 
 - Money helpers. Every amount is an integer number of micro-USD;
